@@ -4,6 +4,9 @@ from copy import deepcopy
 import cv2
 import numpy as np
 from typing import Optional
+from abc import ABC, abstractmethod
+import threading
+import time
 
 class FrameBuffer:
     """
@@ -99,6 +102,52 @@ class FrameBuffer:
         """Returns frames in logical order (oldest → newest)."""
         return [self.get(i) for i in range(self.capacity)]
 
+class VideoStreamThread:
+    """
+    Continuously updates a VideoStream in a background thread.
+    """
+
+    def __init__(self, stream: VideoStream, update_interval: float = 0.01):
+        """
+        :param stream: VideoStream instance to update
+        :param update_interval: seconds between updates (default 0.01 = 100 FPS)
+        """
+        self.stream = stream
+        self.update_interval = update_interval
+        self._running = False
+        self._thread: threading.Thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        if not self._running:
+            self._running = True
+            self._thread.start()
+
+    def _run(self):
+        while self._running and self.stream.is_running():
+            self.stream.update()
+            time.sleep(self.update_interval)  # control update frequency
+
+    def stop(self):
+        self._running = False
+        if self._thread.is_alive():
+            self._thread.join()
+        self.stream.stop()
+
+class VideoStreamListener(ABC):
+    """
+    Listener class for VideoStream.
+    """
+
+    def __init__(self):
+        pass
+    
+    @abstractmethod
+    def onFrame(last_scaled: object, full_buffer: FrameBuffer, scaled_buffer: FrameBuffer):
+        """
+        A trigger method for when a new frame is captured.
+        """
+        pass
+
 class VideoStream:
     """
     Represents a single video input source using OpenCV.
@@ -107,7 +156,7 @@ class VideoStream:
       - scaled_buffer: 320x180 scaled frames (center-cropped)
     """
 
-    def __init__(self, name: str, buffer_size: int, capture_index: int = 0, width: int = 640, height: int = 480):
+    def __init__(self, name: str, buffer_size: int, capture_index: int = 0, width: int = 640, height: int = 480, update_interval: float = 0.01):
         self.name = name
         self.capture_index = capture_index
         self.capture = cv2.VideoCapture(capture_index)
@@ -119,6 +168,9 @@ class VideoStream:
 
         self.scaled_width = 320
         self.scaled_height = 180
+
+        self.listeners : List[VideoStreamListener] = []
+        self.thread : VideoStreamThread = VideoStreamThread(self, update_interval)
 
         if not self.capture.isOpened():
             raise RuntimeError(f"Failed to open camera {capture_index}")
@@ -135,6 +187,8 @@ class VideoStream:
 
             scaled = self._crop_and_scale(frame, self.scaled_width, self.scaled_height)
             self.scaled_buffer.add(scaled)
+            for listener in self.listeners:
+                listener.on_frame(self.get_latest_scaled(), self.full_buffer, self.scaled_buffer)
 
     def _crop_and_scale(self, frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
         """
@@ -188,6 +242,7 @@ class VideoStream:
     def stop(self):
         if self.capture.isOpened():
             self.capture.release()
+            self.thread.stop()
 
     def __str__(self):
         return f"VideoStream[{self.name}, {int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))}, full={self.full_buffer.count_frames()}, scaled={self.scaled_buffer.count_frames()}]"
