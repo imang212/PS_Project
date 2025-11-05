@@ -1,4 +1,4 @@
-# Návrh zadání závěrečné práce (Bakalářská práce)
+# Návrh zadání projektu
 
 ## Název tématu v češtině:
 **Systém pro analýzu, klasifikaci a třídění objektů v reálném čase**
@@ -32,38 +32,6 @@ Cílem této bakalářské práce je **navrhnout, implementovat a otestovat syst
 Výstupem práce bude **funkční prototyp zařízení**, které je schopné v reálném čase analyzovat obraz, klasifikovat objekty a na základě toho je třídit. Součástí bude také **softwarová aplikace** pro sběr a vizualizaci dat a **dokumentace** popisující návrh, implementaci a výsledky testování.
 
 ---
-
-### Osnova:
-
-1.  **Úvod**
-    *   Motivace a cíle práce.
-    *   Popis problému automatizovaného třídění.
-    *   Struktura práce.
-2.  **Přehled současného stavu problematiky**
-    *   Metody počítačového vidění pro detekci a klasifikaci objektů (CNN, YOLO atd.).
-    *   Přehled vestavěných systémů a AI akcelerátorů (Raspberry Pi, AI HAT, Google Coral).
-    *   Existující řešení pro automatizované třídění.
-3.  **Návrh systému**
-    *   Celková architektura systému (hardware a software).
-    *   Výběr hardwarových komponent (Raspberry Pi, kamera, AI modul, třídící mechanismus).
-    *   Návrh softwarových modulů a jejich interakce.
-4.  **Implementace**
-    *   Příprava vývojového prostředí.
-    *   Trénování a optimalizace modelu pro klasifikaci.
-    *   Vývoj aplikace pro analýzu videa a sběr dat.
-    *   Implementace ovládání pro hardwarový třídící mechanismus.
-    *   Vytvoření vizualizačního rozhraní.
-5.  **Testování a výsledky**
-    *   Metodika testování přesnosti a rychlosti systému.
-    *   Prezentace výsledků testování.
-    *   Zhodnocení výkonu a spolehlivosti prototypu.
-6.  **Závěr**
-    *   Shrnutí dosažených výsledků.
-    *   Zhodnocení přínosu práce.
-    *   Možnosti dalšího rozvoje a vylepšení systému.
-
----
-
 ### Literatura:
 *   Dokumentace k Raspberry Pi a použitému AI modulu (např. Raspberry Pi AI Kit).
 *   Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press.
