@@ -31,12 +31,5 @@ Cílem této bakalářské práce je **navrhnout, implementovat a otestovat syst
 #### Výstupy práce:
 Výstupem práce bude **funkční prototyp zařízení**, které je schopné v reálném čase analyzovat obraz, klasifikovat objekty a na základě toho je třídit. Součástí bude také **softwarová aplikace** pro sběr a vizualizaci dat a **dokumentace** popisující návrh, implementaci a výsledky testování.
 
----
-### Literatura:
-*   Dokumentace k Raspberry Pi a použitému AI modulu (např. Raspberry Pi AI Kit).
-*   Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press.
-*   Szeliski, R. (2010). *Computer Vision: Algorithms and Applications*. Springer.
-*   Knihovny pro počítačové vidění a strojové učení (OpenCV, TensorFlow, PyTorch).
-*   Články a tutoriály týkající se implementace AI modelů na vestavěných zařízeních.
-*   Odkaz na konkrétní hardware: https://rpishop.cz/516728/raspberry-pi-ai-kit/
-
+# Úkoly:
+Udělat software pro analýzu videosignálu.
