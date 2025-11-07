@@ -13,31 +13,32 @@ Systém bude implementován na **Raspberry Pi** s připojeným **AI akcelerátor
 ## Architektura systému
 
 ### Přehled komponent
-```
-+--------------------------------------------------------------+
-|                       Raspberry Pi                           |
-|                                                              |
-|  +----------------+     +----------------+     +-----------+ |
-|  | Kamera (PiCam) | --> |  AI model (TFLite)  | --> | Decision | |
-|  +----------------+     +----------------+     +-----------+ |
-|          |                      |                     |       |
-|          |                      |                     v       |
-|          |                      |              +---------------+
-|          |                      |              | Servo / Motor |
-|          |                      |              +---------------+
-|          |                      |
-|          |                      v
-|          |            +----------------------+
-|          +----------> | Data Logger (Python) |
-|                       +----------------------+
-|                                |
-|                                v
-|                       +----------------------+
-|                       | Web Server (Flask)   |
-|                       |  - API               |
-|                       |  - Dashboard (HTML)  |
-|                       +----------------------+
-+--------------------------------------------------------------+
+```mermaid
+flowchart TD
+    subgraph RPI[Raspberry Pi + AI Accelerator]
+        CAM[📷 Kamera (PiCam)]
+        MODEL[🧠 AI model (TensorFlow Lite)]
+        DECISION[⚙️ Rozhodovací logika]
+        SERVO[🔧 Servo / Motor]
+        LOGGER[🗂️ Data Logger]
+        WEB[🌐 Flask Web Server]
+    end
+
+    CAM --> MODEL
+    MODEL --> DECISION
+    DECISION --> SERVO
+    DECISION --> LOGGER
+    LOGGER --> WEB
+
+    subgraph USER[Uživatel]
+        UI[💻 Web Dashboard]
+    end
+
+    WEB --> UI
+
+    style RPI fill:#f9f9f9,stroke:#888,stroke-width:1px,corner-radius:8px
+    style USER fill:#eef6ff,stroke:#55a,stroke-width:1px,corner-radius:8px
+
 ```
 
 ### Datový tok
