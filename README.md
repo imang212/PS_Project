@@ -1,35 +1,159 @@
-# Návrh zadání projektu
+# Real-time Object Analysis, Classification, and Sorting System 
+**(Systém pro analýzu, klasifikaci a třídění objektů v reálném čase)**
 
-## Název tématu v češtině:
-**Systém pro analýzu, klasifikaci a třídění objektů v reálném čase**
+## Cíl projektu
+Cílem projektu je **vytvořit prototyp systému**, který dokáže v reálném čase:
+- analyzovat obraz z kamery,
+- rozpoznat a klasifikovat objekty (např. jablka, brambory, obaly),
+- na základě klasifikace **ovládat hardware pro fyzické třídění** (např. servo, páka),
+- a zároveň **zaznamenávat a vizualizovat data o třídění** ve webovém rozhraní.
 
-## Název tématu v angličtině:
-**Real-time Object Analysis, Classification, and Sorting System**
+Systém bude implementován na **Raspberry Pi** s připojeným **AI akcelerátorem** (např. Google Coral USB Accelerator) a kamerou.
+
+## Architektura systému
+
+### Přehled komponent
+```mermaid
+flowchart TD
+    subgraph RPI[Raspberry Pi + AI Accelerator]
+        CAM["Kamera (PiCam)"]
+        MODEL["AI model (TensorFlow Lite)"]
+        DECISION["Rozhodovací logika"]
+        SERVO["Servo / Motor"]
+        LOGGER["Data Logger"]
+        WEB["Flask Web Server"]
+    end
+
+    CAM --> MODEL
+    MODEL --> DECISION
+    DECISION --> SERVO
+    DECISION --> LOGGER
+    LOGGER --> USER
+
+    subgraph USER[Uživatel]
+        UI[Web Dashboard]
+    end
+
+    WEB --> UI
+
+    style RPI fill:#f9f9f9,stroke:#888,stroke-width:1px,corner-radius:8px
+    style USER fill:#eef6ff,stroke:#55a,stroke-width:1px,corner-radius:8px
+```
+
+### Datový tok
+1. **Kamera** snímá objekt v reálném čase.  
+2. **AI model (TensorFlow Lite)** provede detekci a klasifikaci.  
+3. **Rozhodovací logika** vyhodnotí výsledek a vyšle signál servu.  
+4. **Servo motor** fyzicky třídí objekt (např. doprava = dobrý kus, doleva = vadný).  
+5. **Logger** ukládá výsledky (čas, typ objektu, výsledek) do databáze nebo CSV.  
+6. **Flask server** poskytuje webové rozhraní pro zobrazení statistik a živého videa.
+
+## Rozdělení rolí v týmu
+
+### 1. AI / Computer Vision Inženýr
+**Zodpovědnosti:**
+- Rešerše metod detekce a klasifikace (YOLOv5, MobileNet, EfficientNet, atd.).
+- Sběr a příprava datové sady (fotky objektů, anotace).
+- Trénink a optimalizace modelu pro Raspberry Pi (konverze na TFLite, kvantizace).
+- Testování přesnosti modelu.
+
+**Technologie:**
+- Python, TensorFlow / PyTorch  
+- OpenCV, LabelImg  
+- Jupyter Notebook
 
 ---
 
-### Anotace tématu
+### 2. Embedded & Hardware Inženýr
+**Zodpovědnosti:**
+- Konfigurace Raspberry Pi (OS, kamera, GPIO).
+- Připojení a programování servomotorů, snímačů a kamery.
+- Implementace komunikační logiky mezi AI modulem a hardwarem.
+- Optimalizace pro běh v reálném čase (nižší latence, vyšší FPS).
 
-#### Motivace tématu:
-V mnoha průmyslových a zemědělských odvětvích je klíčová automatizovaná kontrola kvality a třídění produktů. Tato práce se zaměřuje na návrh a implementaci systému, který dokáže v reálném čase analyzovat video signál, rozpoznávat, segmentovat a klasifikovat objekty a na základě této klasifikace je fyzicky třídit. Příkladem může být třídička brambor, jablek nebo jiných produktů, kde je potřeba oddělit vadné kusy. Cílem je vytvořit prototyp běžící na dostupném hardwaru, jako je Raspberry Pi s AI akcelerátorem, a demonstrovat tak praktickou aplikaci moderních metod počítačového vidění a strojového učení.
+**Technologie:**
+- Python (RPi.GPIO / gpiozero)  
+- Raspberry Pi OS  
+- Coral USB Accelerator / Intel Movidius  
+- Bash / Docker (volitelné)
 
-#### Cíl práce:
-Cílem této bakalářské práce je **navrhnout, implementovat a otestovat systém pro analýzu videosignálu, klasifikaci objektů a následné hardwarové roztřídění**. Systém bude postaven na platformě Raspberry Pi s AI modulem a bude schopen v reálném čase zpracovávat obraz, sbírat data o klasifikovaných objektech, vizualizovat je a ovládat externí hardware pro fyzické třídění.
+### 3. Software & Data Visualization Vývojář
+**Zodpovědnosti:**
+- Vývoj webového rozhraní (Flask + Bootstrap / Chart.js).
+- Implementace REST API pro přístup k výsledkům klasifikace.
+- Ukládání a vizualizace dat (CSV, SQLite, PostgreSQL).
+- Dokumentace a prezentace výsledků.
 
-#### Cíle práce (Podrobný rozpis):
-*   **Rešerše:** Přehled metod pro rozpoznávání, segmentaci a klasifikaci objektů v obraze. Analýza dostupných hardwarových řešení pro AI na vestavěných systémech (např. AI HAT pro Raspberry Pi).
-*   **Návrh systému:** Architektura systému zahrnující softwarové i hardwarové komponenty. Definice komunikačních protokolů mezi jednotlivými částmi.
-*   **Sběr a příprava dat:** Vytvoření nebo získání datové sady pro trénování modelu (např. obrázky různých kvalit jablek/brambor).
-*   **Implementace modelu:** Výběr, natrénování a optimalizace modelu pro klasifikaci objektů pro nasazení na Raspberry Pi.
-*   **Vývoj softwaru:** Implementace softwaru pro:
-    *   1. Analýzu videosignálu z kamery.
-    *   2. Zprostředkování sběru dat o detekovaných objektech (kategorie, čas detekce).
-    *   3. Vizualizaci dat (např. v jednoduchém webovém rozhraní).
-*   **Hardwarová integrace:** Napojení na hardwarový systém (např. servo, páka), který provede fyzické roztřídění klasifikovných objektů.
-*   **Testování a evaluace:** Otestování celého systému v reálném scénáři, zhodnocení přesnosti klasifikace a spolehlivosti třídění.
+**Technologie:**
+- Python, Flask / FastAPI  
+- HTML, CSS, JavaScript (Bootstrap, Chart.js)  
+- SQLite / PostgreSQL  
+- Git, Markdown, Docker
 
-#### Výstupy práce:
-Výstupem práce bude **funkční prototyp zařízení**, které je schopné v reálném čase analyzovat obraz, klasifikovat objekty a na základě toho je třídit. Součástí bude také **softwarová aplikace** pro sběr a vizualizaci dat a **dokumentace** popisující návrh, implementaci a výsledky testování.
+## Modulová struktura projektu
+```
+project/
+├── ai_model/
+│   ├── train_model.ipynb        # Trénování modelu
+│   ├── model.tflite             # Optimalizovaný model
+│   └── dataset/                 # Data pro trénink
+│
+├── hardware/
+│   ├── servo_controller.py      # Ovládání motorů
+│   ├── camera_stream.py         # Práce s kamerou
+│   └── gpio_setup.py            # Nastavení GPIO pinů
+│
+├── web/
+│   ├── app.py                   # Flask backend
+│   ├── static/                  # CSS, JS, grafy
+│   └── templates/               # HTML šablony
+│
+├── data/
+│   ├── results.csv              # Log detekovaných objektů
+│   └── stats.db                 # Databáze výsledků
+│
+└── docs/
+    ├── architecture_diagram.png # Architektura systému
+    └── README.md                # Dokumentace projektu
+```
 
-# Úkoly:
-Udělat software pro analýzu videosignálu.
+## Testování a evaluace
+- **Funkční testy** – klasifikace objektů v reálném čase.  
+- **Výkonnostní testy** – měření FPS, latence a odezvy systému.  
+- **Přesnost modelu** – Confusion Matrix, F1-score, přesnost klasifikace.  
+- **Spolehlivost třídění** – procento správně roztříděných objektů.
+
+## Výstupy projektu
+- Funkční **prototyp třídicího zařízení** s kamerou a servem.  
+- **Webové rozhraní** pro vizualizaci dat o klasifikaci.  
+- **Dataset + natrénovaný model**.  
+- **Závěrečná zpráva** a **technická dokumentace** systému.
+
+## Použité technologie
+| Oblast | Technologie |
+|--------|--------------|
+| AI / ML | TensorFlow, TensorFlow Lite, OpenCV |
+| Embedded | Raspberry Pi, GPIO, Coral USB Accelerator |
+| Backend | Flask, Python |
+| Frontend | HTML, CSS, Bootstrap, Chart.js |
+| Databáze | SQLite / PostgreSQL |
+| Ostatní | Git, Docker, Markdown |
+
+## Návrh časového plánu (přehledově)
+| Týden | Aktivita |
+|--------|-----------|
+| 1–2 | Rešerše, návrh architektury |
+| 3–5 | Sběr dat, trénink modelu |
+| 6–7 | Vývoj softwaru (Flask, API, vizualizace) |
+| 8–9 | Integrace s Raspberry Pi a hardwarem |
+| 10 | Testování a ladění |
+| 11 | Dokumentace a příprava prezentace |
+
+## Autoři projektu
+| Jméno | Role | Zodpovědnost |
+|-------|------|--------------|
+| [Člen 1] | AI inženýr | Vývoj modelu a datová analýza |
+| [Člen 2] | Embedded vývojář | Raspberry Pi, servo, kamera |
+| [Člen 3] | Software vývojář | Web, API, vizualizace a dokumentace |
+
+*Projekt vznikl v rámci univerzitního kurzu jako demonstrační prototyp využívající moderní metody počítačového vidění, strojového učení a embedded systémů.*
