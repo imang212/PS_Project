@@ -1,249 +1,285 @@
 from __future__ import annotations
-from typing import List, Optional, Iterator
-from copy import deepcopy
-import cv2
 import numpy as np
-from typing import Optional
-from abc import ABC, abstractmethod
+import cv2
+from typing import Iterator, Optional, List, Tuple
 import threading
 import time
+from abc import ABC, abstractmethod
 
 class FrameBuffer:
-    """
-    FrameBuffer — A fixed-length, circular buffer for storing image frames.
-    
-    Always maintains the same length (capacity), even if not yet full.
-    Returns frames in logical order (oldest → newest).
-    Overwrites oldest frames when new ones are added beyond capacity.
-    Designed for real-time video streams and AI frame parsing.
-    """
-    
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self.frames: List[Optional[object]] = [None] * capacity  # Underlying storage
-        self.head = 0   # Index to write next frame
-        self.count = 0  # Number of valid frames
+    def __init__(self, capacity: int, frame_shape: tuple[int, ...], frame_dtype: type = np.uint8) -> None:
+        """
+        Initializes the buffer.
+        
+        :param capacity: Number of frames to keep
+        :param frame_shape: Shape of each frame (height, width, channels)
+        :param frame_dtype: Data type of the frames (default uint8 for CV2)
+        """
+        self.capacity: int = capacity
+        self.frame_shape: tuple[int, ...] = frame_shape
+        self.frame_dtype: type = frame_dtype
+        self.buffer: np.ndarray = np.zeros((capacity, *frame_shape), dtype=frame_dtype)
+        self.index: int = 0
+        self.full: bool = False
+        self._lock = threading.Lock()
 
-    # -----------------------------------------------------------------------
-    # ADDING FRAMES
-    # -----------------------------------------------------------------------
-    def add(self, frame: Optional[object]):
-        """Add a new frame to the buffer, copying it for safety."""
-        self.frames[self.head] = None if frame is None else deepcopy(frame)
-        self.head = (self.head + 1) % self.capacity
-        if self.count < self.capacity:
-            self.count += 1
+    def add_frame(self, frame: np.ndarray) -> None:
+        """
+        Adds a new frame to the buffer, overwriting the oldest if full.
+        """
+        with self._lock:
+            if frame.shape != self.frame_shape:
+                raise ValueError(f"Frame shape {frame.shape} does not match buffer shape {self.frame_shape}")
+            
+            self.buffer[self.index] = frame
+            self.index = (self.index + 1) % self.capacity
+            if self.index == 0:
+                self.full = True
 
-    # -----------------------------------------------------------------------
-    # ACCESSING FRAMES
-    # -----------------------------------------------------------------------
-    def get(self, index: int) -> Optional[object]:
-        """Return the frame at a logical index (0 = oldest, capacity-1 = newest)."""
-        if index < 0 or index >= self.capacity:
-            raise IndexError(f"{index} out of bounds for capacity {self.capacity}")
-        if self.count < self.capacity and index >= self.count:
-            return None
-        logical_base = (self.head - self.count + self.capacity) % self.capacity
-        real_index = (logical_base + index) % self.capacity
-        return self.frames[real_index]
+    def get(self, i: int) -> np.ndarray:
+        """
+        Returns the i-th oldest frame (0 is oldest).
+        """
+        with self._lock:
+            if self.full:
+                if i < 0 or i >= self.capacity:
+                    raise IndexError("Index out of range")
+                real_index: int = (self.index + i) % self.capacity
+                return self.buffer[real_index]
+            else:
+                if i < 0 or i >= self.index:
+                    raise IndexError("Index out of range")
+                return self.buffer[i]
 
-    def set(self, index: int, frame: Optional[object]):
-        """Set or replace a frame at a specific logical position."""
-        if index < 0 or index >= self.capacity:
-            raise IndexError(f"{index} out of bounds for capacity {self.capacity}")
-        logical_base = (self.head - self.count + self.capacity) % self.capacity
-        real_index = (logical_base + index) % self.capacity
-        self.frames[real_index] = None if frame is None else deepcopy(frame)
+    def __len__(self) -> int:
+        """
+        Returns the number of frames currently in the buffer.
+        """
+        return self.capacity if self.full else self.index
 
-    def get_newest(self) -> Optional[object]:
-        return None if self.count == 0 else self.get(self.count - 1)
+    def __getitem__(self, i: int) -> np.ndarray:
+        """
+        Allows indexing like buffer[i] to get the i-th oldest frame.
+        """
+        return self.get(i)
 
-    def get_oldest(self) -> Optional[object]:
-        return None if self.count == 0 else self.get(0)
-
-    def get_relative(self, offset: int) -> Optional[object]:
-        """Offset 0 = newest, 1 = one before newest, etc."""
-        if offset < 0 or offset >= self.capacity:
-            return None
-        idx = (self.head - 1 - offset + self.capacity) % self.capacity
-        return self.frames[idx]
-
-    # -----------------------------------------------------------------------
-    # INFORMATION
-    # -----------------------------------------------------------------------
-    def size(self) -> int:
-        return self.capacity
-
-    def count_frames(self) -> int:
-        return self.count
-
-    def is_full(self) -> bool:
-        return self.count == self.capacity
-
-    def is_empty(self) -> bool:
-        return self.count == 0
-
-    def clear(self):
-        self.frames = [None] * self.capacity
-        self.head = 0
-        self.count = 0
-
-    # -----------------------------------------------------------------------
-    # ITERATION SUPPORT
-    # -----------------------------------------------------------------------
-    def __iter__(self) -> Iterator[Optional[object]]:
-        for i in range(self.capacity):
+    def __iter__(self) -> Iterator[np.ndarray]:
+        """
+        Iterates over frames from oldest to newest.
+        """
+        for i in range(len(self)):
             yield self.get(i)
 
-    # -----------------------------------------------------------------------
-    # ARRAY CONVERSION
-    # -----------------------------------------------------------------------
-    def to_list(self) -> List[Optional[object]]:
-        """Returns frames in logical order (oldest → newest)."""
-        return [self.get(i) for i in range(self.capacity)]
-
-class VideoStreamThread:
-    """
-    Continuously updates a VideoStream in a background thread.
-    """
-
-    def __init__(self, stream: VideoStream, update_interval: float = 0.01):
-        """
-        :param stream: VideoStream instance to update
-        :param update_interval: seconds between updates (default 0.01 = 100 FPS)
-        """
-        self.stream = stream
-        self.update_interval = update_interval
-        self._running = False
-        self._thread: threading.Thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self):
-        if not self._running:
-            self._running = True
-            self._thread.start()
-
-    def _run(self):
-        while self._running and self.stream.is_running():
-            self.stream.update()
-            time.sleep(self.update_interval)  # control update frequency
-
-    def stop(self):
-        self._running = False
-        if self._thread.is_alive():
-            self._thread.join()
-        self.stream.stop()
-
 class VideoStreamListener(ABC):
-    """
-    Listener class for VideoStream.
-    """
-
-    def __init__(self):
-        pass
-    
+    """Listener interface triggered when a new frame is available."""
     @abstractmethod
-    def onFrame(last_scaled: object, full_buffer: FrameBuffer, scaled_buffer: FrameBuffer):
-        """
-        A trigger method for when a new frame is captured.
-        """
+    def on_frame(self, frame: np.ndarray) -> None:
         pass
 
-class VideoStream:
-    """
-    Represents a single video input source using OpenCV.
-    Maintains two frame buffers:
-      - full_buffer: full-resolution frames
-      - scaled_buffer: 320x180 scaled frames (center-cropped)
-    """
-
-    def __init__(self, name: str, buffer_size: int, capture_index: int = 0, width: int = 640, height: int = 480, update_interval: float = 0.01):
-        self.name = name
-        self.capture_index = capture_index
-        self.capture = cv2.VideoCapture(capture_index)
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-
-        self.full_buffer = FrameBuffer(buffer_size)
-        self.scaled_buffer = FrameBuffer(buffer_size)
-
-        self.scaled_width = 320
-        self.scaled_height = 180
-
-        self.listeners : List[VideoStreamListener] = []
-        self.thread : VideoStreamThread = VideoStreamThread(self, update_interval)
-
-        if not self.capture.isOpened():
-            raise RuntimeError(f"Failed to open camera {capture_index}")
-
-    def update(self):
+class VideoStreamThread(threading.Thread):
+    """Thread that continuously updates a VideoStream."""
+    def __init__(self, stream: 'VideoStream', interval: float = 0.0) -> None:
         """
-        Grab a new frame from the camera and update buffers.
-        Should be called continuously in a loop.
+        :param stream: The VideoStream to update
+        :param interval: Sleep interval between updates (0 = no delay)
         """
-        ret, frame = self.capture.read()
-        if ret:
-            # OpenCV frames are NumPy arrays (BGR)
-            self.full_buffer.add(frame)
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.interval = interval
+        self._running = True
 
-            scaled = self._crop_and_scale(frame, self.scaled_width, self.scaled_height)
-            self.scaled_buffer.add(scaled)
-            for listener in self.listeners:
-                listener.on_frame(self.get_latest_scaled(), self.full_buffer, self.scaled_buffer)
+    def run(self) -> None:
+        while self._running:
+            self.stream.update()
+            if self.interval > 0:
+                time.sleep(self.interval)
 
-    def _crop_and_scale(self, frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    def stop(self) -> None:
+        self._running = False
+
+
+class VideoStream(ABC):
+    """Abstract base class for video streams (capture or file)."""
+    
+    def __init__(self, name: str, frame_shape: Tuple[int, ...], scaled_shape: Tuple[int, ...], full_buffer_size: int = 10, scaled_buffer_size: int = 10) -> None:
         """
-        Center-crop the frame to maintain the target aspect ratio, then resize.
+        :param name: Name of the stream
+        :param full_buffer_size: Number of frames in full resolution buffer
+        :param scaled_buffer_size: Number of frames in scaled buffer
+        :param scaled_shape: Optional shape to scale frames for scaled_buffer (width, height)
         """
-        src_h, src_w = frame.shape[:2]
-        src_aspect = src_w / src_h
-        target_aspect = target_w / target_h
+        self.name: str = name
+        self.listeners: List[VideoStreamListener] = []
+        
+        self.full_buffer = FrameBuffer(full_buffer_size, frame_shape)
+        self.scaled_buffer = FrameBuffer(scaled_buffer_size, scaled_shape)
+        self.frame_shape = frame_shape
+        self.scaled_shape = scaled_shape
 
-        crop_w, crop_h = src_w, src_h
+        # Start update thread
+        self._thread = VideoStreamThread(self)
 
-        if src_aspect > target_aspect:
-            # Too wide: crop width
-            crop_w = int(src_h * target_aspect)
+    @abstractmethod
+    def read(self):
+        pass
+
+    def update(self) -> None:
+        """Update buffers with a new frame and notify listeners."""
+        frame = self.read()
+        if frame is None:
+            return  # No new frame
+
+        # Add to buffers
+        self.full_buffer.add_frame(frame)
+        scaled_frame = self.resize(frame, self.scaled_shape)
+        self.scaled_buffer.add_frame(scaled_frame)
+
+        # Notify listeners
+        for listener in self.listeners:
+            listener.on_frame(frame)
+    
+    def resize(self, frame: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Crop and rescale a frame to the target_shape, keeping the center.
+
+        :param frame: Input frame (H, W, C)
+        :param target_shape: Desired output shape (width, height)
+        :return: Cropped and resized frame
+        """
+        target_w, target_h = target_shape
+        h, w = frame.shape[:2]
+
+        # Compute aspect ratios
+        frame_ratio = w / h
+        target_ratio = target_w / target_h
+
+        # Determine cropping dimensions
+        if frame_ratio > target_ratio:
+            # Frame is wider -> crop width
+            new_w = int(h * target_ratio)
+            new_h = h
+            x1 = (w - new_w) // 2
+            y1 = 0
         else:
-            # Too tall: crop height
-            crop_h = int(src_w / target_aspect)
+            # Frame is taller -> crop height
+            new_w = w
+            new_h = int(w / target_ratio)
+            x1 = 0
+            y1 = (h - new_h) // 2
 
-        x = (src_w - crop_w) // 2
-        y = (src_h - crop_h) // 2
+        # Crop the frame
+        cropped = frame[y1:y1+new_h, x1:x1+new_w]
 
-        cropped = frame[y:y + crop_h, x:x + crop_w]
-        resized = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        # Resize to target shape
+        resized = cv2.resize(cropped, (target_w, target_h))
         return resized
 
-    # === Accessors ===
-    def get_name(self) -> str:
-        return self.name
+    @property
+    def last_frame(self) -> np.ndarray:
+        """Return the newest frame from the full buffer."""
+        if len(self.full_buffer) == 0:
+            raise RuntimeError("No frames in buffer")
+        return self.full_buffer[len(self.full_buffer) - 1]
 
-    def get_capture(self) -> cv2.VideoCapture:
-        return self.capture
+    def add_listener(self, listener: VideoStreamListener) -> None:
+        """Add a listener to be notified of new frames."""
+        self.listeners.append(listener)
 
-    def get_full_buffer(self) -> FrameBuffer:
-        return self.full_buffer
+    def remove_listener(self, listener: VideoStreamListener) -> None:
+        """Remove a listener."""
+        self.listeners.remove(listener)
+    
+    def start(self):
+        """Start the update thread."""
+        self._thread.start()
 
-    def get_scaled_buffer(self) -> FrameBuffer:
-        return self.scaled_buffer
+    def stop(self) -> None:
+        """Stop the update thread."""
+        self._thread.stop()
+        self._thread.join()
+        self.on_stop()
 
-    def get_latest_full(self) -> Optional[np.ndarray]:
-        return self.full_buffer.get_newest()
+    @abstractmethod
+    def on_stop(self):
+        """Hook called when the stream is stopped."""
+        pass
 
-    def get_latest_scaled(self) -> Optional[np.ndarray]:
-        return self.scaled_buffer.get_newest()
+class VideoPlayer(VideoStream):
+    """Video stream from a video file."""
+    
+    def __init__(self, filename: str, name: Optional[str] = None, scaled_shape: Optional[Tuple[int,int]] = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10):
+        self.filename = filename
+        self.cap = cv2.VideoCapture(filename)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open video file: {filename}")
+        
+        ret, frame = self.cap.read()
+        if not ret:
+            raise RuntimeError("Cannot read first frame from video file")
 
-    def is_ready(self) -> bool:
-        return self.full_buffer.count_frames() > 0
+        if scaled_shape is None:
+            scaled_shape = (frame.shape[1] // 2, frame.shape[0] // 2)
 
-    def is_running(self) -> bool:
-        return self.capture.isOpened()
+        super().__init__(
+            name=name or f"VideoPlayer:{filename}",
+            frame_shape=frame.shape,
+            scaled_shape=scaled_shape,
+            full_buffer_size=full_buffer_size,
+            scaled_buffer_size=scaled_buffer_size
+        )
+        # add first frame manually
+        self.full_buffer.add_frame(frame)
+        self.scaled_buffer.add_frame(self.resize(frame, self.scaled_buffer.frame_shape[:2][::-1]))
 
-    def stop(self):
-        if self.capture.isOpened():
-            self.capture.release()
-            self.thread.stop()
+        self.start()
 
-    def __str__(self):
-        return f"VideoStream[{self.name}, {int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))}, full={self.full_buffer.count_frames()}, scaled={self.scaled_buffer.count_frames()}]"
+    def read(self) -> Optional[np.ndarray]:
+        """Read the next frame from the video."""
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+    
+    def on_stop(self):
+        super().stop()
+        self.cap.release()
 
+class VideoCapture(VideoStream):
+    """Video stream from a camera device."""
+    
+    def __init__(self, device_index: int = 0, name: Optional[str] = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10, scaled_shape: Optional[Tuple[int,int]] = None):
+        self.device_index = device_index
+        self.cap = cv2.VideoCapture(device_index)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open camera: {device_index}")
+        
+        ret, frame = self.cap.read()
+        if not ret:
+            raise RuntimeError("Cannot read first frame from camera")
+
+        if scaled_shape is None:
+            scaled_shape = (frame.shape[1] // 2, frame.shape[0] // 2)
+
+        super().__init__(
+            name=name or f"VideoCapture:{device_index}",
+            frame_shape=frame.shape,
+            scaled_shape=scaled_shape,
+            full_buffer_size=full_buffer_size,
+            scaled_buffer_size=scaled_buffer_size
+        )
+        # add first frame manually
+        self.full_buffer.add_frame(frame)
+        self.scaled_buffer.add_frame(self.resize(frame, self.scaled_buffer.frame_shape[:2][::-1]))
+
+        self.start()
+
+    def read(self) -> Optional[np.ndarray]:
+        """Try reading a frame from the camera."""
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+    def on_stop(self):
+        super().stop()
+        self.cap.release()
