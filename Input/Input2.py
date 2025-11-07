@@ -108,12 +108,11 @@ class VideoStream(ABC):
         self.name: str = name
         self.listeners: List[VideoStreamListener] = []
         
-        self.full_buffer = FrameBuffer(full_buffer_size, frame_shape, frame.dtype)
-        self.scaled_buffer = FrameBuffer(scaled_buffer_size, scaled_shape, frame.dtype)
+        self.full_buffer = FrameBuffer(full_buffer_size, frame_shape)
+        self.scaled_buffer = FrameBuffer(scaled_buffer_size, scaled_shape)
 
         # Start update thread
         self._thread = VideoStreamThread(self)
-        self._thread.start()
 
     @abstractmethod
     def read(self):
@@ -121,8 +120,8 @@ class VideoStream(ABC):
 
     def update(self) -> None:
         """Update buffers with a new frame and notify listeners."""
-        frame = self.read():
-        if not ret or frame is None:
+        frame = self.read()
+        if frame is None:
             return  # No new frame
 
         # Add to buffers
@@ -184,10 +183,15 @@ class VideoStream(ABC):
     def remove_listener(self, listener: VideoStreamListener) -> None:
         """Remove a listener."""
         self.listeners.remove(listener)
+    
+    def start(self):
+        """Start the update thread."""
+        self._thread.start()
 
     def stop(self) -> None:
         """Stop the update thread."""
         self._thread.stop()
+        self._thread.join()
 
 class VideoPlayer(VideoStream):
     """Video stream from a video file."""
