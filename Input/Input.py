@@ -101,7 +101,7 @@ class VideoStreamThread(threading.Thread):
 class VideoStream(ABC):
     """Abstract base class for video streams (capture or file)."""
     
-    def __init__(self, name: str, frame_shape: Tuple[int, ...], scaled_shape: Tuple[int, ...], full_buffer_size: int = 10, scaled_buffer_size: int = 10) -> None:
+    def __init__(self, frame_shape: Tuple[int, ...], scaled_shape: Tuple[int, ...], name: str = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10) -> None:
         """
         :param name: Name of the stream
         :param full_buffer_size: Number of frames in full resolution buffer
@@ -207,7 +207,7 @@ class VideoStream(ABC):
 class VideoPlayer(VideoStream):
     """Video stream from a video file."""
     
-    def __init__(self, filename: str, name: Optional[str], scaled_shape: Optional[Tuple[int,int]], full_buffer_size: int = 10, scaled_buffer_size: int = 10):
+    def __init__(self, filename: str, scaled_shape: Tuple[int,int], name: str = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10):
         self.filename = filename
         self.cap = cv2.VideoCapture(filename)
         if not self.cap.isOpened():
@@ -247,7 +247,7 @@ class VideoPlayer(VideoStream):
 class VideoCapture(VideoStream):
     """Video stream from a camera device."""
     
-    def __init__(self, device_index: int = 0, name: Optional[str] = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10, scaled_shape: Optional[Tuple[int,int]] = None):
+    def __init__(self, device_index: int = 0, name: str = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10, scaled_shape: Optional[Tuple[int,int]] = None):
         self.device_index = device_index
         self.cap = cv2.VideoCapture(device_index)
         if not self.cap.isOpened():
