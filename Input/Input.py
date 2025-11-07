@@ -207,7 +207,7 @@ class VideoStream(ABC):
 class VideoPlayer(VideoStream):
     """Video stream from a video file."""
     
-    def __init__(self, filename: str, name: Optional[str] = None, scaled_shape: Optional[Tuple[int,int]] = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10):
+    def __init__(self, filename: str, name: Optional[str], scaled_shape: Optional[Tuple[int,int]], full_buffer_size: int = 10, scaled_buffer_size: int = 10):
         self.filename = filename
         self.cap = cv2.VideoCapture(filename)
         if not self.cap.isOpened():
@@ -283,3 +283,5 @@ class VideoCapture(VideoStream):
     def on_stop(self):
         super().stop()
         self.cap.release()
+
+player = VideoPlayer("sample_video.mp4")
