@@ -4,6 +4,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 import threading
 import time
+import yt_dlp
 
 class FrameBuffer:
     def __init__(self, capacity: int, frame_shape: tuple[int, ...], frame_dtype: type = np.uint8) -> None:
@@ -224,18 +225,8 @@ class _GrayScaleStrategy(VideoStreamFormatterStrategy):
 
 class VideoStream:
     WINDOWS_CAMERA: int = cv.CAP_DSHOW
-    def __init__(self, src:int|str=0, api:int=cv.CAP_DSHOW, buffer_size: int = 10, threaded: bool = False, thread_frequency: float = 0.01, format_strategy: VideoStreamFormatterStrategy = None):
-        if isinstance(src, int):
-            self.cap = cv.VideoCapture(src, api)
-            if not self.cap.isOpened():
-                raise CameraOpenError("Error: cannot open camera", src=src, api=api)
-        elif isinstance(src, str):
-            self.cap = cv.VideoCapture(src)
-            if not self.cap.isOpened():
-                raise CameraOpenError("Error: cannot open video file", src=src)
-        else:
-            raise CameraOpenError("Error: invalid video source", src, api=api)
-        
+    def __init__(self, video_provider: VideoProvider, buffer_size: int = 10, threaded: bool = False, thread_frequency: float = 0.01, format_strategy: VideoStreamFormatterStrategy = None):
+        self._video_provider: VideoProvider = video_provider
         self._frame_shape: np.ndarray = None
         self._frame_buffer: FrameBuffer = None
         self._formatted_buffer: FrameBuffer = None
@@ -262,8 +253,8 @@ class VideoStream:
         return self._frame_shape
     
     @property
-    def stream_ended(self):
-        return self.cap.get(cv.CAP_PROP_POS_FRAMES) >= self.cap.get(cv.CAP_PROP_FRAME_COUNT)
+    def has_source_ended(self):
+        return not self._video_provider.is_active()
     
     @property
     def device_name(self):
@@ -283,7 +274,8 @@ class VideoStream:
             time.sleep(self._thread_frequency)
 
     def update(self):
-        read, frame = self.cap.read()
+        frame = self._video_provider.read()
+
         if frame is None:
             return
         formatted_frame = self._format_strategy.apply(frame, self) if self._format_strategy else frame
@@ -293,14 +285,14 @@ class VideoStream:
             self._frame_shape = frame.shape
         if self._frame_buffer is None:
             self._frame_buffer = FrameBuffer(capacity=self._buffer_size, frame_shape=self.frame_shape)
-        if read:
-            self._frame_buffer.add_frame(frame)
-            self.formatted_buffer.add_frame(formatted_frame)
-            for listener in self._listeners:
-                if isinstance(listener, VideoStreamListener):
-                    listener.on_frame(frame, formatted_frame, self)
-                else:
-                    self._listeners.remove(listener)
+
+        self._frame_buffer.add_frame(frame)
+        self.formatted_buffer.add_frame(formatted_frame)
+        for listener in self._listeners:
+            if isinstance(listener, VideoStreamListener):
+                listener.on_frame(frame, formatted_frame, self)
+            else:
+                self._listeners.remove(listener)
     
     def add_listener(self, listener: VideoStreamListener) -> None:
         self._listeners.append(listener)
@@ -311,3 +303,79 @@ class VideoStream:
     def release(self):
         self.cap.release()
         cv.destroyAllWindows()
+
+class VideoProvider(ABC):
+    @abstractmethod
+    def read(self) -> np.ndarray:
+        pass
+
+    @abstractmethod
+    def get_name(self) -> str:
+        pass
+
+    @abstractmethod
+    def is_active(self) -> bool:
+        pass
+
+class CameraVideoProvider(VideoProvider):
+    def __init__(self, src: int | str = 0, api: int = VideoStream.WINDOWS_CAMERA):
+        self.cap = cv.VideoCapture(src, api)
+        if not self.cap.isOpened():
+            raise CameraOpenError(src=src, api=api)
+    
+    def get_name(self) -> str:
+        return self.cap.getBackendName()
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+class FileVideoProvider(VideoProvider):
+    def __init__(self, filepath: str):
+        self.cap = cv.VideoCapture(filepath)
+        if not self.cap.isOpened():
+            raise CameraOpenError(src=filepath)
+    
+    def get_name(self) -> str:
+        return self.cap.getBackendName()
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+class YouTubeVideoProvider(VideoProvider):
+    def __init__(self, url: str):
+        self.url = url
+        self.video_url = self._get_stream_url(url)
+        self.cap = cv.VideoCapture(self.video_url)
+        if not self.cap.isOpened():
+            raise CameraOpenError(src=url)
+    
+    def _get_stream_url(self, url: str) -> str:
+        """Extract the direct video stream URL using yt_dlp."""
+        ydl_opts = {'format': 'best', 'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info['url']
+    
+    def get_name(self) -> str:
+        return f"YouTube: {self.url}"
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame

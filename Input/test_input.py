@@ -6,7 +6,7 @@ import numpy as np
 import threading
 import time
 from Yui import Yui, YuiRoot, Graphics, Stack, Color
-from Input import VideoStream, VideoStreamListener, CameraOpenError, VideoStreamFormatterStrategy
+from Input import VideoStream, VideoStreamListener, CameraOpenError, VideoStreamFormatterStrategy, CameraVideoProvider, YouTubeVideoProvider
 
 class VideoYui(Yui, VideoStreamListener):
     def __init__(self, parent: Yui, stream: VideoStream):
@@ -80,9 +80,11 @@ class VideoYui(Yui, VideoStreamListener):
     
 def main():
     root = YuiRoot(name="Video Stream Test", width=800, height=600)
+
     strategy = VideoStreamFormatterStrategy.resize_strategy((160, 90), interpolation=cv.INTER_LINEAR)
     strategy.append_chain(VideoStreamFormatterStrategy.gray_scale_strategy())
-    stream = VideoStream(src=0, api=cv.CAP_DSHOW, buffer_size=10, format_strategy=strategy)
+    video_provider = YouTubeVideoProvider("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    stream = VideoStream(video_provider, buffer_size=10, format_strategy=strategy)
     video_yui = VideoYui(root, stream)
     stream.add_listener(video_yui)
     root.auto_background = Color(0, 0, 0, 0)
