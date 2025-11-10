@@ -1,5 +1,101 @@
 # Input.py — Souhrn
 
+## Diagram tříd
+```mermaid
+classDiagram
+    %% Core Buffer Component
+    class FrameBuffer {
+        -capacity: int
+        -frame_shape: tuple
+        -buffer: ndarray
+        -index: int
+        -full: bool
+        -_lock: Lock
+        +add_frame(frame)
+        +get(i): ndarray
+        +__len__(): int
+        +__getitem__(i): ndarray
+        +__iter__(): Iterator
+    }
+
+    %% Observer Pattern Interface
+    class VideoStreamListener {
+        <<interface>>
+        +on_frame(frame)*
+    }
+
+    %% Thread Component
+    class VideoStreamThread {
+        -stream: VideoStream
+        -interval: float
+        -_running: bool
+        +run()
+        +stop()
+    }
+
+    %% Abstract Base Class
+    class VideoStream {
+        <<abstract>>
+        -name: str
+        -listeners: List~VideoStreamListener~
+        -full_buffer: FrameBuffer
+        -scaled_buffer: FrameBuffer
+        -_thread: VideoStreamThread
+        +read()*
+        +update()
+        +resize(frame, target_shape): ndarray
+        +last_frame: ndarray
+        +add_listener(listener)
+        +remove_listener(listener)
+        +start()
+        +stop()
+        +on_stop()*
+    }
+
+    %% Concrete Implementations
+    class VideoCapture {
+        -device_index: int
+        -cap: cv2.VideoCapture
+        +read(): ndarray
+        +on_stop()
+    }
+
+    class VideoPlayer {
+        -filename: str
+        -cap: cv2.VideoCapture
+        +read(): ndarray
+        +on_stop()
+    }
+
+    %% Example Listener Implementation
+    class FrameStatsListener {
+        -frame_count: int
+        -start_time: float
+        +on_frame(frame)
+        +get_fps(): float
+    }
+
+    %% Relationships
+    VideoStream --> "2" FrameBuffer: contains
+    VideoStream --> "*" VideoStreamListener: notifies
+    VideoStream --> "1" VideoStreamThread: uses
+    VideoStreamThread --> VideoStream: updates
+    
+    VideoCapture --|> VideoStream: inherits
+    VideoPlayer --|> VideoStream: inherits
+    
+    FrameStatsListener ..|> VideoStreamListener: implements
+    
+    %% Design Pattern Annotations
+    note for VideoStreamListener "OBSERVER PATTERN\nListeners are notified\nwhen new frames arrive"
+    
+    note for VideoStream "TEMPLATE METHOD PATTERN\nDefines algorithm structure,\nsubclasses implement specifics"
+    
+    note for FrameBuffer "CIRCULAR BUFFER\nRing buffer with\nthread-safe operations"
+    
+    note for VideoStreamThread "ACTIVE OBJECT PATTERN\nSeparates method execution\nfrom method invocation"
+```
+
 ## Účel
 Poskytuje nástroje pro čtení a normalizaci vstupu pro projekt (soubory, stdin a jednoduché proudy), validaci základního formátování a předávání konzistentních chyb volajícím.
 
