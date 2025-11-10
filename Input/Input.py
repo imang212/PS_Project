@@ -1,10 +1,9 @@
 from __future__ import annotations
+import cv2 as cv
 import numpy as np
-import cv2
-from typing import Iterator, Optional, List, Tuple
+from abc import ABC, abstractmethod
 import threading
 import time
-from abc import ABC, abstractmethod
 
 class FrameBuffer:
     def __init__(self, capacity: int, frame_shape: tuple[int, ...], frame_dtype: type = np.uint8) -> None:
@@ -70,218 +69,149 @@ class FrameBuffer:
         for i in range(len(self)):
             yield self.get(i)
 
+class CameraOpenError(Exception):
+    """Raised when the requested camera/video source cannot be opened.
+
+    Stores details about the attempt so callers can inspect/log them.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        src: int | str | None = None,
+        api: int | None = None,
+        last_error: Exception | str | None = None,
+    ):
+        # Allow legacy use: CameraOpenError("Error: cannot open camera")
+        self.message = message or "Failed to open camera/video source"
+        self.src = src
+        self.api = api
+        self.last_error = last_error
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        parts = [self.message]
+        if self.src is not None:
+            parts.append(f"src={self.src!r}")
+        if self.api is not None:
+            parts.append(f"api={self.api!r}")
+        if self.last_error is not None:
+            parts.append(f"last_error={self.last_error!r}")
+        return " | ".join(parts)
+
+    def to_dict(self) -> dict:
+        """Return a serializable representation of the error details."""
+        return {
+            "message": self.message,
+            "src": self.src,
+            "api": self.api,
+            "last_error": repr(self.last_error),
+        }
+
+    def __str__(self) -> str:
+        return self._build_message()
+
 class VideoStreamListener(ABC):
-    """Listener interface triggered when a new frame is available."""
-    @abstractmethod
-    def on_frame(self, frame: np.ndarray) -> None:
+    def __init__(self):
         pass
 
-class VideoStreamThread(threading.Thread):
-    """Thread that continuously updates a VideoStream."""
-    def __init__(self, stream: 'VideoStream', interval: float = 0.0) -> None:
-        """
-        :param stream: The VideoStream to update
-        :param interval: Sleep interval between updates (0 = no delay)
-        """
-        super().__init__(daemon=True)
-        self.stream = stream
-        self.interval = interval
-        self._running = True
-
-    def run(self) -> None:
-        while self._running:
-            self.stream.update()
-            if self.interval > 0:
-                time.sleep(self.interval)
-
-    def stop(self) -> None:
-        self._running = False
-
-
-class VideoStream(ABC):
-    """Abstract base class for video streams (capture or file)."""
-    
-    def __init__(self, frame_shape: Tuple[int, ...], scaled_shape: Tuple[int, ...], name: str = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10) -> None:
-        """
-        :param name: Name of the stream
-        :param full_buffer_size: Number of frames in full resolution buffer
-        :param scaled_buffer_size: Number of frames in scaled buffer
-        :param scaled_shape: Optional shape to scale frames for scaled_buffer (width, height)
-        """
-        self.name: str = name
-        self.listeners: List[VideoStreamListener] = []
-        
-        self.full_buffer = FrameBuffer(full_buffer_size, frame_shape)
-        self.scaled_buffer = FrameBuffer(scaled_buffer_size, scaled_shape)
-        self.frame_shape = frame_shape
-        self.scaled_shape = scaled_shape
-
-        # Start update thread
-        self._thread = VideoStreamThread(self)
-
     @abstractmethod
-    def read(self):
+    def on_frame(self, frame: np.ndarray, formatted_frame: np.ndarray, stream: VideoStream) -> None:
+        """Called when a new frame is available."""
         pass
 
-    def update(self) -> None:
-        """Update buffers with a new frame and notify listeners."""
-        frame = self.read()
-        if frame is None:
-            return  # No new frame
+class VideoStreamFormatterStrategy(ABC):
+    @abstractmethod
+    def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        pass
 
-        # Add to buffers
-        self.full_buffer.add_frame(frame)
-        scaled_frame = self.resize(frame, self.scaled_shape)
-        self.scaled_buffer.add_frame(scaled_frame)
-
-        # Notify listeners
-        for listener in self.listeners:
-            listener.on_frame(frame)
-    
-    def resize(self, frame: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
-        """
-        Crop and rescale a frame to the target_shape, keeping the center.
-
-        :param frame: Input frame (H, W, C)
-        :param target_shape: Desired output shape (width, height)
-        :return: Cropped and resized frame
-        """
-        target_w, target_h = target_shape
-        h, w = frame.shape[:2]
-
-        # Compute aspect ratios
-        frame_ratio = w / h
-        target_ratio = target_w / target_h
-
-        # Determine cropping dimensions
-        if frame_ratio > target_ratio:
-            # Frame is wider -> crop width
-            new_w = int(h * target_ratio)
-            new_h = h
-            x1 = (w - new_w) // 2
-            y1 = 0
+class VideoStream:
+    WINDOWS_CAMERA: int = cv.CAP_DSHOW
+    def __init__(self, src:int|str=0, api:int=cv.CAP_DSHOW, buffer_size: int = 10, threaded: bool = False, thread_frequency: float = 0.01, format_strategy: VideoStreamFormatterStrategy = None):
+        if isinstance(src, int):
+            self.cap = cv.VideoCapture(src, api)
+            if not self.cap.isOpened():
+                raise CameraOpenError("Error: cannot open camera", src=src, api=api)
+        elif isinstance(src, str):
+            self.cap = cv.VideoCapture(src)
+            if not self.cap.isOpened():
+                raise CameraOpenError("Error: cannot open video file", src=src)
         else:
-            # Frame is taller -> crop height
-            new_w = w
-            new_h = int(w / target_ratio)
-            x1 = 0
-            y1 = (h - new_h) // 2
-
-        # Crop the frame
-        cropped = frame[y1:y1+new_h, x1:x1+new_w]
-
-        # Resize to target shape
-        resized = cv2.resize(cropped, (target_w, target_h))
-        return resized
+            raise CameraOpenError("Error: invalid video source", src, api=api)
+        
+        self._frame_shape: np.ndarray = None
+        self._frame_buffer: FrameBuffer = None
+        self._formatted_buffer: FrameBuffer = None
+        self._format_strategy: VideoStreamFormatterStrategy = format_strategy
+        self._listeners: list[VideoStreamListener] = []
+        self._buffer_size: int = buffer_size
+        self._thread_frequency: float = thread_frequency
+        self._thread: threading.Thread = None if not threaded else threading.Thread(target=self._threaded_update, daemon=True)
+        if threaded:
+            self._thread.start()
+    
+    @property
+    def is_file(self):
+        return isinstance(self.device_name, str) and self.device_name != ""
+    
+    def is_threaded(self):
+        return self._thread is not None
+    
+    def thread_frequency(self):
+        return self._thread_frequency
 
     @property
-    def last_frame(self) -> np.ndarray:
-        """Return the newest frame from the full buffer."""
-        if len(self.full_buffer) == 0:
-            raise RuntimeError("No frames in buffer")
-        return self.full_buffer[len(self.full_buffer) - 1]
+    def frame_shape(self):
+        return self._frame_shape
+    
+    @property
+    def stream_ended(self):
+        return self.cap.get(cv.CAP_PROP_POS_FRAMES) >= self.cap.get(cv.CAP_PROP_FRAME_COUNT)
+    
+    @property
+    def device_name(self):
+        return self.cap.getBackendName()
+    
+    @property
+    def frame_buffer(self):
+        return self._frame_buffer
+    
+    @property
+    def formatted_buffer(self):
+        return self._formatted_buffer
+    
+    def _threaded_update(self):
+        while True:
+            self.update()
+            time.sleep(self._thread_frequency)
 
+    def update(self):
+        read, frame = self.cap.read()
+        if frame is None:
+            return
+        formatted_frame = self._format_strategy.format(frame, self) if self._format_strategy else frame
+        if self._formatted_buffer is None:
+            self._formatted_buffer = FrameBuffer(capacity=self._buffer_size, frame_shape=formatted_frame.shape)
+        if self._frame_shape is None:
+            self._frame_shape = frame.shape
+        if self._frame_buffer is None:
+            self._frame_buffer = FrameBuffer(capacity=self._buffer_size, frame_shape=self.frame_shape)
+        if read:
+            self._frame_buffer.add_frame(frame)
+            self.formatted_buffer.add_frame(formatted_frame)
+            for listener in self._listeners:
+                if isinstance(listener, VideoStreamListener):
+                    listener.on_frame(frame, formatted_frame, self)
+                else:
+                    self._listeners.remove(listener)
+    
     def add_listener(self, listener: VideoStreamListener) -> None:
-        """Add a listener to be notified of new frames."""
-        self.listeners.append(listener)
-
+        self._listeners.append(listener)
+    
     def remove_listener(self, listener: VideoStreamListener) -> None:
-        """Remove a listener."""
-        self.listeners.remove(listener)
-    
-    def start(self):
-        """Start the update thread."""
-        self._thread.start()
+        self._listeners.remove(listener)
 
-    def stop(self) -> None:
-        """Stop the update thread."""
-        self._thread.stop()
-        self._thread.join()
-        self.on_stop()
-
-    @abstractmethod
-    def on_stop(self):
-        """Hook called when the stream is stopped."""
-        pass
-
-class VideoPlayer(VideoStream):
-    """Video stream from a video file."""
-    
-    def __init__(self, filename: str, scaled_shape: Tuple[int,int], name: str = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10):
-        self.filename = filename
-        self.cap = cv2.VideoCapture(filename)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open video file: {filename}")
-        
-        ret, frame = self.cap.read()
-        if not ret:
-            raise RuntimeError("Cannot read first frame from video file")
-
-        if scaled_shape is None:
-            scaled_shape = (frame.shape[1] // 2, frame.shape[0] // 2)
-
-        super().__init__(
-            name=name or f"VideoPlayer:{filename}",
-            frame_shape=frame.shape,
-            scaled_shape=scaled_shape,
-            full_buffer_size=full_buffer_size,
-            scaled_buffer_size=scaled_buffer_size
-        )
-        # add first frame manually
-        self.full_buffer.add_frame(frame)
-        self.scaled_buffer.add_frame(self.resize(frame, self.scaled_buffer.frame_shape[:2][::-1]))
-
-        self.start()
-
-    def read(self) -> Optional[np.ndarray]:
-        """Read the next frame from the video."""
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
-    
-    def on_stop(self):
-        super().stop()
+    def release(self):
         self.cap.release()
-
-class VideoCapture(VideoStream):
-    """Video stream from a camera device."""
-    
-    def __init__(self, device_index: int = 0, name: str = None, full_buffer_size: int = 10, scaled_buffer_size: int = 10, scaled_shape: Optional[Tuple[int,int]] = None):
-        self.device_index = device_index
-        self.cap = cv2.VideoCapture(device_index)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera: {device_index}")
-        
-        ret, frame = self.cap.read()
-        if not ret:
-            raise RuntimeError("Cannot read first frame from camera")
-
-        if scaled_shape is None:
-            scaled_shape = (frame.shape[1] // 2, frame.shape[0] // 2)
-
-        super().__init__(
-            name=name or f"VideoCapture:{device_index}",
-            frame_shape=frame.shape,
-            scaled_shape=scaled_shape,
-            full_buffer_size=full_buffer_size,
-            scaled_buffer_size=scaled_buffer_size
-        )
-        # add first frame manually
-        self.full_buffer.add_frame(frame)
-        self.scaled_buffer.add_frame(self.resize(frame, self.scaled_buffer.frame_shape[:2][::-1]))
-
-        self.start()
-
-    def read(self) -> Optional[np.ndarray]:
-        """Try reading a frame from the camera."""
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
-
-    def on_stop(self):
-        super().stop()
-        self.cap.release()
-
-player = VideoPlayer("sample_video.mp4")
+        cv.destroyAllWindows()
