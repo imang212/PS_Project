@@ -15,6 +15,7 @@ class VideoYui(Yui, VideoStreamListener):
         self.height = self.parent.height
         self.stream = stream
         self.image = None
+        self.buffer = None
 
         print("Initialized")
 
@@ -31,6 +32,8 @@ class VideoYui(Yui, VideoStreamListener):
         except Exception:
             # fallback: use surfarray (requires numpy array shape (width, height, 3))
             self.image = pygame.surfarray.make_surface(np.transpose(image, (1, 0, 2)))
+        
+        self.buffer = stream.frame_buffer
     
     def on_draw(self, graphics: Graphics) -> None:
         self.stream.update()
@@ -54,14 +57,32 @@ class VideoYui(Yui, VideoStreamListener):
         graphics.image_mode = "corner"
         graphics.image(self.image, x, y, w, h)
 
-class FormatterGrayscale(VideoStreamFormatterStrategy):
-    def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        return cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
+        # draw buffer info in the top-left corner
+        graphics.text_align = (0, 0)
+        graphics.fill_color = Color(255, 255, 255, 255)
+        graphics.text_size = 24
+        x, y = 5, 5
+
+        if not self.buffer:
+            graphics.text("buffer: empty", x, y)
+        else:
+            for i, elem in enumerate(self.buffer):
+                if isinstance(elem, np.ndarray):
+                    s = f"buffer[{i}]: shape={elem.shape}, dtype={elem.dtype}, bytes={elem.nbytes}"
+                else:
+                    try:
+                        length = len(elem)
+                    except Exception:
+                        length = None
+                    s = f"buffer[{i}]: type={type(elem).__name__}, len={length}"
+                graphics.text(s, x, y)
+                y += 16
     
 def main():
     root = YuiRoot(name="Video Stream Test", width=800, height=600)
-    stream = VideoStream(src=0, api=cv.CAP_DSHOW, buffer_size=10, format_strategy=FormatterGrayscale())
+    strategy = VideoStreamFormatterStrategy.resize_strategy((160, 90), interpolation=cv.INTER_LINEAR)
+    strategy.append_chain(VideoStreamFormatterStrategy.gray_scale_strategy())
+    stream = VideoStream(src=0, api=cv.CAP_DSHOW, buffer_size=10, format_strategy=strategy)
     video_yui = VideoYui(root, stream)
     stream.add_listener(video_yui)
     root.auto_background = Color(0, 0, 0, 0)

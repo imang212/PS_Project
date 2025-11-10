@@ -122,9 +122,105 @@ class VideoStreamListener(ABC):
         pass
 
 class VideoStreamFormatterStrategy(ABC):
+    def __init__(self):
+        self.next: VideoStreamFormatterStrategy | None = None
+
+    def append_chain(self, strategy: VideoStreamFormatterStrategy) -> VideoStreamFormatterStrategy:
+        """Appends a strategy to the end of the chain."""
+        if self.next is None:
+            self.next = strategy
+        else:
+            self.next.append(strategy)
+        return self
+    
+    def remove_next(self) -> None:
+        """Removes the next strategy in the chain."""
+        if self.next is not None:
+            self.next = self.next.next
+    
+    def insert_chain(self, strategy: VideoStreamFormatterStrategy) -> VideoStreamFormatterStrategy:
+        """Inserts a strategy immediately after this one in the chain."""
+        strategy.next = self.next
+        self.next = strategy
+        return strategy
+    
+    def apply(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        image = self.format(frame, stream)
+        if self.next is not None:
+            image = self.next.format(image, stream)
+        return image
+
     @abstractmethod
     def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
         pass
+
+    @classmethod
+    def resize_strategy(cls, size: int | tuple[int, int], interpolation: int = cv.INTER_AREA) -> '_ResizeStrategy':
+        return _ResizeStrategy(size, interpolation)
+
+    @classmethod
+    def gray_scale_strategy(cls) -> '_GrayScaleStrategy':
+        return _GrayScaleStrategy()
+
+class _ResizeStrategy(VideoStreamFormatterStrategy):
+    """
+    Resize frames to a fixed (width, height) provided in the constructor,
+    scaling to cover the target area and center-cropping the excess.
+
+    :param size: (width, height) tuple or single int (square size)
+    :param interpolation: OpenCV interpolation flag (default cv.INTER_AREA)
+    """
+    def __init__(self, size: int | tuple[int, int], interpolation: int = cv.INTER_AREA) -> None:
+        super().__init__()
+        if isinstance(size, int):
+            self.size = (size, size)
+        else:
+            self.size = tuple(size)
+            if len(self.size) != 2:
+                raise ValueError("size must be an int or a (width, height) tuple")
+        # store as (width, height) to match cv.resize dsize
+        self.interpolation = interpolation
+
+    def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        # frame.shape -> (h, w) or (h, w, c)
+        h, w = frame.shape[:2]
+        target_w, target_h = self.size
+
+        # scale to cover the target area (like CSS 'cover')
+        scale_w = target_w / w
+        scale_h = target_h / h
+        scale = max(scale_w, scale_h)
+
+        new_w = int(np.ceil(w * scale))
+        new_h = int(np.ceil(h * scale))
+
+        # resize first
+        resized = cv.resize(frame, dsize=(new_w, new_h), interpolation=self.interpolation)
+
+        # center-crop to the exact target size
+        x0 = (new_w - target_w) // 2
+        y0 = (new_h - target_h) // 2
+        x1 = x0 + target_w
+        y1 = y0 + target_h
+
+        # handle possible 2D (grayscale) or 3D arrays
+        if resized.ndim == 2:
+            cropped = resized[y0:y1, x0:x1]
+        else:
+            cropped = resized[y0:y1, x0:x1, ...]
+
+        return cropped
+
+class _GrayScaleStrategy(VideoStreamFormatterStrategy):
+    """
+    Convert frames to grayscale.
+    """
+    def __init__(self) -> None:
+        super().__init__()
+
+    def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        return cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
 
 class VideoStream:
     WINDOWS_CAMERA: int = cv.CAP_DSHOW
@@ -190,7 +286,7 @@ class VideoStream:
         read, frame = self.cap.read()
         if frame is None:
             return
-        formatted_frame = self._format_strategy.format(frame, self) if self._format_strategy else frame
+        formatted_frame = self._format_strategy.apply(frame, self) if self._format_strategy else frame
         if self._formatted_buffer is None:
             self._formatted_buffer = FrameBuffer(capacity=self._buffer_size, frame_shape=formatted_frame.shape)
         if self._frame_shape is None:
