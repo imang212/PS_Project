@@ -3,6 +3,21 @@
 ## Diagram tříd
 ```mermaid
 classDiagram
+    %% Relationships
+    VideoStream --|> FrameBuffer: contains
+    VideoStream --|> VideoStreamListener: notifies
+    VideoStream --|> VideoStreamThread: uses
+    VideoStreamThread --|> VideoStream: updates
+    
+    VideoCapture --|> VideoStream: inherits
+    VideoPlayer --|> VideoStream: inherits
+    
+    FrameStatsListener ..|> VideoStreamListener: implements
+    %% Design Pattern Annotations
+    note for VideoStreamListener "OBSERVER PATTERN. Listeners are notified, when new frames arrive"
+    note for VideoStream "TEMPLATE METHOD PATTERN. Defines algorithm structure, subclasses implement specifics"
+    note for FrameBuffer "CIRCULAR BUFFER. Ring buffer with thread-safe operations"
+    note for VideoStreamThread "ACTIVE OBJECT PATTERN. Separates method execution from method invocation"
     %% Core Buffer Component
     class FrameBuffer {
         -capacity: int
@@ -74,26 +89,6 @@ classDiagram
         +on_frame(frame)
         +get_fps(): float
     }
-
-    %% Relationships
-    VideoStream --> "2" FrameBuffer: contains
-    VideoStream --> "*" VideoStreamListener: notifies
-    VideoStream --> "1" VideoStreamThread: uses
-    VideoStreamThread --> VideoStream: updates
-    
-    VideoCapture --|> VideoStream: inherits
-    VideoPlayer --|> VideoStream: inherits
-    
-    FrameStatsListener ..|> VideoStreamListener: implements
-    
-    %% Design Pattern Annotations
-    note for VideoStreamListener "OBSERVER PATTERN\nListeners are notified\nwhen new frames arrive"
-    
-    note for VideoStream "TEMPLATE METHOD PATTERN\nDefines algorithm structure,\nsubclasses implement specifics"
-    
-    note for FrameBuffer "CIRCULAR BUFFER\nRing buffer with\nthread-safe operations"
-    
-    note for VideoStreamThread "ACTIVE OBJECT PATTERN\nSeparates method execution\nfrom method invocation"
 ```
 
 ## Účel
