@@ -1,4 +1,95 @@
 # Input.py — Summary
+## Class diagram
+## Diagram tříd
+```mermaid
+classDiagram
+    %% Relationships
+    VideoStream --|> FrameBuffer: contains
+    VideoStream --|> VideoStreamListener: notifies
+    VideoStream --|> VideoStreamThread: uses
+    VideoStreamThread --|> VideoStream: updates
+    
+    VideoCapture --|> VideoStream: inherits
+    VideoPlayer --|> VideoStream: inherits
+    
+    FrameStatsListener ..|> VideoStreamListener: implements
+    %% Design Pattern Annotations
+    note for VideoStreamListener "OBSERVER PATTERN. Listeners are notified, when new frames arrive"
+    note for VideoStream "TEMPLATE METHOD PATTERN. Defines algorithm structure, subclasses implement specifics"
+    note for FrameBuffer "CIRCULAR BUFFER. Ring buffer with thread-safe operations"
+    note for VideoStreamThread "ACTIVE OBJECT PATTERN. Separates method execution from method invocation"
+    %% Core Buffer Component
+    class FrameBuffer {
+        -capacity: int
+        -frame_shape: tuple
+        -buffer: ndarray
+        -index: int
+        -full: bool
+        -_lock: Lock
+        +add_frame(frame)
+        +get(i): ndarray
+        +__len__(): int
+        +__getitem__(i): ndarray
+        +__iter__(): Iterator
+    }
+
+    %% Observer Pattern Interface
+    class VideoStreamListener {
+        <<interface>>
+        +on_frame(frame)*
+    }
+
+    %% Thread Component
+    class VideoStreamThread {
+        -stream: VideoStream
+        -interval: float
+        -_running: bool
+        +run()
+        +stop()
+    }
+
+    %% Abstract Base Class
+    class VideoStream {
+        <<abstract>>
+        -name: str
+        -listeners: List~VideoStreamListener~
+        -full_buffer: FrameBuffer
+        -scaled_buffer: FrameBuffer
+        -_thread: VideoStreamThread
+        +read()*
+        +update()
+        +resize(frame, target_shape): ndarray
+        +last_frame: ndarray
+        +add_listener(listener)
+        +remove_listener(listener)
+        +start()
+        +stop()
+        +on_stop()*
+    }
+
+    %% Concrete Implementations
+    class VideoCapture {
+        -device_index: int
+        -cap: cv2.VideoCapture
+        +read(): ndarray
+        +on_stop()
+    }
+
+    class VideoPlayer {
+        -filename: str
+        -cap: cv2.VideoCapture
+        +read(): ndarray
+        +on_stop()
+    }
+
+    %% Example Listener Implementation
+    class FrameStatsListener {
+        -frame_count: int
+        -start_time: float
+        +on_frame(frame)
+        +get_fps(): float
+    }
+```
 
 ## Purpose
 Provides utilities to read and normalize input for the project (files, stdin, and simple streams), validate basic formatting, and surface consistent errors to callers.
