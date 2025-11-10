@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Iterator
 import cv2 as cv
 import numpy as np
 from abc import ABC, abstractmethod
@@ -225,7 +226,6 @@ class _GrayScaleStrategy(VideoStreamFormatterStrategy):
         return cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
 
 class VideoStream:
-    WINDOWS_CAMERA: int = cv.CAP_DSHOW
     def __init__(self, video_provider: VideoProvider, buffer_size: int = 10, threaded: bool = False, thread_frequency: float = 0.01, format_strategy: VideoStreamFormatterStrategy = None):
         self._video_provider: VideoProvider = video_provider
         self._frame_shape: np.ndarray = None
@@ -319,7 +319,8 @@ class VideoProvider(ABC):
         pass
 
 class CameraVideoProvider(VideoProvider):
-    def __init__(self, src: int | str = 0, api: int = VideoStream.WINDOWS_CAMERA):
+    WINDOWS_CAMERA: int = cv.CAP_DSHOW
+    def __init__(self, src: int | str = 0, api: int = WINDOWS_CAMERA):
         self.cap = cv.VideoCapture(src, api)
         if not self.cap.isOpened():
             raise CameraOpenError(src=src, api=api)
@@ -360,7 +361,7 @@ class YouTubeVideoProvider(VideoProvider):
         self.video_url = self._get_stream_url(url)
         self.cap = cv.VideoCapture(self.video_url)
         if not self.cap.isOpened():
-            raise CameraOpenError(src=url)
+            raise CameraOpenError("YouTube stream couldn't be opened.", src=url)
     
     def _get_stream_url(self, url: str) -> str:
         """Extract the direct video stream URL using yt_dlp."""
@@ -392,3 +393,4 @@ class YouTubeVideoProvider(VideoProvider):
         if not ret:
             return None
         return frame
+
