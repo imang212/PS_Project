@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import threading
 import time
 import yt_dlp
+import os
 
 class FrameBuffer:
     def __init__(self, capacity: int, frame_shape: tuple[int, ...], frame_dtype: type = np.uint8) -> None:
@@ -367,6 +368,18 @@ class YouTubeVideoProvider(VideoProvider):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             return info['url']
+    
+    def _download_video(self, save_path: str) -> str:
+        """Download the YouTube video and return the local filepath."""
+        os.makedirs(save_path, exist_ok=True)
+        ydl_opts = {
+            'format': 'best[ext=mp4][height<=720]',
+            'outtmpl': os.path.join(save_path, '%(title)s.%(ext)s'),
+            'quiet': True
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(self.url, download=True)
+            return ydl.prepare_filename(info)
     
     def get_name(self) -> str:
         return f"YouTube: {self.url}"
