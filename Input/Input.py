@@ -7,6 +7,7 @@ import threading
 import time
 import yt_dlp
 import os
+from picamera2 import Picamera2
 
 class FrameBuffer:
     def __init__(self, capacity: int, frame_shape: tuple[int, ...], frame_dtype: type = np.uint8) -> None:
@@ -394,3 +395,39 @@ class YouTubeVideoProvider(VideoProvider):
             return None
         return frame
 
+class RaspberryPiCameraProvider(VideoProvider):
+    """
+    VideoProvider for Raspberry Pi using OpenCV's libcamera (v4l2) backend.
+    Works even if picamera2 is unavailable, as long as /dev/video0 exists.
+    """
+
+    def __init__(self, device_index: int = 0, resolution: tuple[int, int] = (1280, 720), framerate: int = 30):
+        self.device_index = device_index
+        self.resolution = resolution
+        self.framerate = framerate
+
+        # Try to open via v4l2/libcamera backend
+        self.cap = cv.VideoCapture(device_index, cv.CAP_V4L2)
+        if not self.cap.isOpened():
+            raise CameraOpenError("Cannot open Raspberry Pi camera", src=device_index, api=cv.CAP_V4L2)
+
+        # Try to apply settings if supported
+        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, resolution[0])
+        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, resolution[1])
+        self.cap.set(cv.CAP_PROP_FPS, framerate)
+
+    def get_name(self) -> str:
+        return f"Raspberry Pi Camera (/dev/video{self.device_index})"
+
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+    def release(self):
+        if self.cap.isOpened():
+            self.cap.release()
