@@ -72,3 +72,4 @@ desktop.ini
 models/
 output/
 *.weights
+yolov3.weights
