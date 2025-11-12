@@ -6,7 +6,7 @@ import numpy as np
 import threading
 import time
 from Yui import Yui, YuiRoot, Graphics, Stack, Color
-from Input import VideoStream, VideoStreamListener, CameraOpenError, VideoStreamFormatterStrategy, CameraVideoProvider, YouTubeVideoProvider
+from Input import VideoStream, VideoStreamListener, CameraOpenError, VideoStreamFormatterStrategy, CameraVideoProvider, YouTubeVideoProvider, RemoteRaspberryPiStreamProvider
 
 class VideoYui(Yui, VideoStreamListener):
     def __init__(self, parent: Yui, stream: VideoStream):
@@ -77,13 +77,15 @@ class VideoYui(Yui, VideoStreamListener):
                     s = f"buffer[{i}]: type={type(elem).__name__}, len={length}"
                 graphics.text(s, x, y)
                 y += 16
+        print(self.stream._frame_buffer)
     
 def main():
     root = YuiRoot(name="Video Stream Test", width=800, height=600)
 
     strategy = VideoStreamFormatterStrategy.resize_strategy((160, 90), interpolation=cv.INTER_LINEAR)
     strategy.append_chain(VideoStreamFormatterStrategy.gray_scale_strategy())
-    video_provider = YouTubeVideoProvider("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    #video_provider = YouTubeVideoProvider("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    video_provider = RemoteRaspberryPiStreamProvider(raspberry_ip="raspberrypi.local", raspberry_user="imang", raspberry_password="imang", stream_port=8554, resolution=(640, 480))
     stream = VideoStream(video_provider, buffer_size=10, format_strategy=strategy)
     video_yui = VideoYui(root, stream)
     stream.add_listener(video_yui)
