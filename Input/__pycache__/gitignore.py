@@ -73,3 +73,4 @@ models/
 output/
 *.weights
 yolov3.weights
+models/yolov3.weights
