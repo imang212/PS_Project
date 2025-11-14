@@ -39,7 +39,26 @@ flowchart TD
     style RPI fill:#f9f9f9,stroke:#888,stroke-width:1px,corner-radius:8px
     style USER fill:#eef6ff,stroke:#55a,stroke-width:1px,corner-radius:8px
 ```
+### Možnost stavby komponent
+```mermaid
+graph TD
+    subgraph Notebook_PC["Notebook / PC"]
+        A1[FastAPI Web Server] --> A2[AI / ML Analyzátor videa]
+        A1 --> A3[Frontend Dashboard]
+        A2 -->|Pošle příkaz| A4["API klient (HTTP Request)"]
+    end
 
+    subgraph RaspberryPi["Raspberry Pi"]
+        B1[Mini FastAPI API Server]
+        B2["Servo Controller (GPIO / PCA9685)"]
+        B3["Kamera (IMX708 / CSI)"]
+        B1 --> B2
+        B1 --> B3
+    end
+
+    A4 -->|HTTP POST/GET| B1
+    B3 -->|RTSP / Snapshot| A2
+```
 ### Datový tok
 1. **Kamera** snímá objekt v reálném čase.  
 2. **AI model (TensorFlow Lite)** provede detekci a klasifikaci.  
@@ -130,30 +149,30 @@ project/
 - **Závěrečná zpráva** a **technická dokumentace** systému.
 
 ## Použité technologie
-| Oblast | Technologie |
-|--------|--------------|
-| AI / ML | TensorFlow, TensorFlow Lite, OpenCV |
+| Oblast   | Technologie                               |
+| -------- | ----------------------------------------- |
+| AI / ML  | TensorFlow, TensorFlow Lite, OpenCV       |
 | Embedded | Raspberry Pi, GPIO, Coral USB Accelerator |
-| Backend | Flask, Python |
-| Frontend | HTML, CSS, Bootstrap, Chart.js |
-| Databáze | SQLite / PostgreSQL |
-| Ostatní | Git, Docker, Markdown |
+| Backend  | Flask, Python                             |
+| Frontend | HTML, CSS, Bootstrap, Chart.js            |
+| Databáze | SQLite / PostgreSQL                       |
+| Ostatní  | Git, Docker, Markdown                     |
 
 ## Návrh časového plánu (přehledově)
-| Týden | Aktivita |
-|--------|-----------|
-| 1–2 | Rešerše, návrh architektury |
-| 3–5 | Sběr dat, trénink modelu |
-| 6–7 | Vývoj softwaru (Flask, API, vizualizace) |
-| 8–9 | Integrace s Raspberry Pi a hardwarem |
-| 10 | Testování a ladění |
-| 11 | Dokumentace a příprava prezentace |
+| Týden | Aktivita                                 |
+| ----- | ---------------------------------------- |
+| 1–2   | Rešerše, návrh architektury              |
+| 3–5   | Sběr dat, trénink modelu                 |
+| 6–7   | Vývoj softwaru (Flask, API, vizualizace) |
+| 8–9   | Integrace s Raspberry Pi a hardwarem     |
+| 10    | Testování a ladění                       |
+| 11    | Dokumentace a příprava prezentace        |
 
 ## Autoři projektu
-| Jméno | Role | Zodpovědnost |
-|-------|------|--------------|
-| [Člen 1] | AI inženýr | Vývoj modelu a datová analýza |
-| [Člen 2] | Embedded vývojář | Raspberry Pi, servo, kamera |
+| Jméno    | Role             | Zodpovědnost                        |
+| -------- | ---------------- | ----------------------------------- |
+| [Člen 1] | AI inženýr       | Vývoj modelu a datová analýza       |
+| [Člen 2] | Embedded vývojář | Raspberry Pi, servo, kamera         |
 | [Člen 3] | Software vývojář | Web, API, vizualizace a dokumentace |
 
 *Projekt vznikl v rámci univerzitního kurzu jako demonstrační prototyp využívající moderní metody počítačového vidění, strojového učení a embedded systémů.*
