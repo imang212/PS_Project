@@ -396,218 +396,79 @@ class YouTubeVideoProvider(VideoProvider):
             return None
         return frame
 
-class RaspberryPiCameraProvider(VideoProvider):
+import cv2 as cv
+import paramiko
+import subprocess
+import time
+
+class PiCameraProvider(VideoProvider):
     """
-    VideoProvider for Raspberry Pi using OpenCV's libcamera (v4l2) backend.
-    Works even if picamera2 is unavailable, as long as /dev/video0 exists.
+    PiCamera provider supporting:
+    - Onboard: local OpenCV capture.
+    - Remote: SSH to Pi, start rpicam-vid stream via TCP, read via OpenCV.
     """
 
-    def __init__(self, device_index: int = 0, resolution: tuple[int, int] = (1280, 720), framerate: int = 30):
-        self.device_index = device_index
-        self.resolution = resolution
-        self.framerate = framerate
+    def __init__(self, ssh_user=None, ssh_password=None, ssh_host=None,
+                 ssh_port=22, width=640, height=480, fps=30):
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.remote_mode = ssh_user is not None and ssh_host is not None
 
-        # Try to open via v4l2/libcamera backend
-        self.cap = cv.VideoCapture(device_index, cv.CAP_V4L2)
-        if not self.cap.isOpened():
-            raise CameraOpenError("Cannot open Raspberry Pi camera", src=device_index, api=cv.CAP_V4L2)
+        self.cap = None  # OpenCV capture
+        self.ssh_client = None
+        self.remote_process = None
+        self.stream_url = None
 
-        # Try to apply settings if supported
-        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, resolution[0])
-        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, resolution[1])
-        self.cap.set(cv.CAP_PROP_FPS, framerate)
+        if self.remote_mode:
+            # Setup SSH
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.ssh_client.connect(hostname=ssh_host, port=ssh_port,
+                                    username=ssh_user, password=ssh_password)
 
-    def get_name(self) -> str:
-        return f"Raspberry Pi Camera (/dev/video{self.device_index})"
+            # Start rpicam-vid via SSH to listen on port 5000
+            self.stream_port = 5004
+            cmd = f"rpicam-vid --width {width} --height {height} --framerate {fps} --encoding mjpeg -o - | nc -l -p {self.stream_port}"
+            self.remote_process = self.ssh_client.exec_command(cmd)
+            time.sleep(1)  # give it a moment to start
 
-    def is_active(self) -> bool:
-        return self.cap.isOpened()
-
-    def read(self) -> np.ndarray:
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
-
-    def release(self):
-        if self.cap.isOpened():
-            self.cap.release()
-
-class RemoteRaspberryPiStreamProvider(VideoProvider):
-    """
-    VideoProvider that connects via SSH to Raspberry Pi, starts rpicam-vid stream,
-    and then connects to the TCP stream using OpenCV.
-    """
-    def __init__(self,
-        raspberry_ip: str,
-        raspberry_user: str,
-        raspberry_password: str | None = None,
-        ssh_key_path: str | None = None,
-        stream_port: int = 8554,
-        resolution: tuple[int, int] = (640, 480),
-        framerate: int = 30,
-        stream_command: str | None = None
-    ):
-        """
-        Initialize remote Raspberry Pi stream.
-        :param raspberry_ip: IP address or hostname of Raspberry Pi (e.g., "192.168.37.141" or "raspberrypi.local")
-        :param raspberry_user: SSH username (e.g., "imang")
-        :param raspberry_password: SSH password (optional if using SSH key)
-        :param ssh_key_path: Path to SSH private key (optional if using password)
-        :param stream_port: TCP port for the stream (default 8554)
-        :param resolution: Video resolution as (width, height)
-        :param framerate: Frames per second
-        :param stream_command: Custom rpicam-vid command (if None, uses default)
-        """
-        self.raspberry_ip = raspberry_ip
-        self.raspberry_user = raspberry_user
-        self.raspberry_password = raspberry_password
-        self.ssh_key_path = ssh_key_path
-        self.stream_port = stream_port
-        self.resolution = resolution
-        self.framerate = framerate
-        # Build stream command if not provided
-        if stream_command is None:
-            self.stream_command = f"rpicam-vid -t 0 --inline --listen -n --width {resolution[0]} --height {resolution[1]} --framerate {framerate} -o tcp://0.0.0.0:{stream_port}"
-        else:
-            self.stream_command = stream_command
-        # SSH connection and channel
-        self.ssh = None
-        self.channel = None
-        # OpenCV capture
-        self.cap = None
-        # Start the connection
-        self._connect()
-    
-    def _connect(self):
-        """Establish SSH connection and start the stream."""
-        try:
-            # Create SSH client
-            self.ssh = paramiko.SSHClient()
-            self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            print(f"[RemoteRPi] Connecting to {self.raspberry_ip}...")
-            # Connect with password or SSH key
-            if self.ssh_key_path:
-                self.ssh.connect(self.raspberry_ip, username=self.raspberry_user, key_filename=self.ssh_key_path)
-            elif self.raspberry_password:
-                self.ssh.connect(self.raspberry_ip, username=self.raspberry_user, password=self.raspberry_password)
-            else:
-                raise ValueError("Either raspberry_password or ssh_key_path must be provided")
-            
-            print(f"[RemoteRPi] Starting stream: {self.stream_command}")
-            # Start the stream command
-            self.channel = self.ssh.get_transport().open_session()
-            self.channel.exec_command(self.stream_command)
-            # Wait for stream to initialize
-            print("[RemoteRPi] Waiting for stream to initialize...")
-            time.sleep(3)
-            # Connect to the TCP stream
-            stream_url = f"tcp://{self.raspberry_ip}:{self.stream_port}"
-            print(f"[RemoteRPi] Connecting to stream: {stream_url}")
-            self.cap = cv.VideoCapture(stream_url, cv.CAP_FFMPEG)
-            
+            # Connect OpenCV to TCP stream
+            self.stream_url = f"tcp://{ssh_host}:{self.stream_port}"
+            self.cap = cv.VideoCapture(self.stream_url)
             if not self.cap.isOpened():
-                raise CameraOpenError("Failed to open remote Raspberry Pi stream",src=stream_url)
-            
-            print("[RemoteRPi] Stream successfully connected!")
-            
-        except Exception as e:
-            self._cleanup()
-            raise CameraOpenError("Failed to connect to remote Raspberry Pi", src=self.raspberry_ip, last_error=str(e))
-    
-    def _cleanup(self):
-        """Clean up SSH and video capture resources."""
-        if self.cap is not None and self.cap.isOpened():
-            self.cap.release()
-        
-        if self.channel is not None and not self.channel.closed:
-            # Send Ctrl+C to stop the stream
-            try:
-                self.channel.send(b'\x03')
-                time.sleep(0.5)
-                self.channel.close()
-            except:
-                pass
-        
-        if self.ssh is not None:
-            try:
-                self.ssh.close()
-            except:
-                pass
-    
-    def get_name(self) -> str:
-        return f"Remote Raspberry Pi Stream ({self.raspberry_ip}:{self.stream_port})"
-    
-    def is_active(self) -> bool:
+                raise CameraOpenError(f"Cannot open remote Pi camera stream at {self.stream_url}")
+
+        else:
+            # Onboard
+            self.cap = cv.VideoCapture(0)
+            if not self.cap.isOpened():
+                raise CameraOpenError("Cannot open onboard Pi camera")
+
+    def read(self):
+        if self.cap:
+            ret, frame = self.cap.read()
+            print(frame)
+            if not ret:
+                return None
+            return frame
+        return None
+
+    def get_name(self):
+        return "PiCamera (remote)" if self.remote_mode else "PiCamera (onboard)"
+
+    def is_active(self):
         return self.cap is not None and self.cap.isOpened()
-    
-    def read(self) -> np.ndarray:
-        if not self.is_active():
-            return None
-        
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
-    
+
     def release(self):
-        """Release all resources and stop the remote stream."""
-        print("[RemoteRPi] Releasing resources...")
-        self._cleanup()
-        print("[RemoteRPi] Connection closed.")
-    
-    def __del__(self):
-        """Ensure cleanup on object destruction."""
-        self._cleanup()
-
-class RaspberryPiStream(VideoProvider):
-    """
-    VideoProvider for Raspberry Pi using OpenCV's libcamera (v4l2) backend.
-    Works even if picamera2 is unavailable, as long as /dev/video0 exists.
-    """
-    def __init__(self, raspberry_ip: str, stream_port: int = 8554, resolution: tuple[int, int] = (1280, 720), framerate: int = 30):
-        self.raspberry_ip = raspberry_ip
-        self.stream_port = stream_port
-        self.resolution = resolution
-        self.framerate = framerate
-         
-        stream_url = f"tcp://{self.raspberry_ip}:{self.stream_port}"
-        print(f"[RemoteRPi] Connecting to stream: {stream_url}")
-        self.cap = cv.VideoCapture(stream_url, cv.CAP_FFMPEG)    
-        if not self.cap.isOpened():
-            raise CameraOpenError("Cannot open Raspberry Pi camera")
-
-        # Try to apply settings if supported
-        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, resolution[0])
-        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, resolution[1])
-        self.cap.set(cv.CAP_PROP_FPS, framerate)
-
-    def _cleanup(self):
-        """Clean up SSH and video capture resources."""
-        if self.cap is not None and self.cap.isOpened():
+        if self.cap:
             self.cap.release()
-        
-    def get_name(self) -> str:
-        return f"Remote Raspberry Pi Stream ({self.raspberry_ip}:{self.stream_port})"
-    
-    def is_active(self) -> bool:
-        return self.cap is not None and self.cap.isOpened()
-    
-    def read(self) -> np.ndarray:
-        if not self.is_active():
-            return None
-        
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
-    
-    def release(self):
-        """Release all resources and stop the remote stream."""
-        print("[RemoteRPi] Releasing resources...")
-        self._cleanup()
-        print("[RemoteRPi] Connection closed.")
-    
-    def __del__(self):
-        """Ensure cleanup on object destruction."""
-        self._cleanup()
+        if self.remote_mode:
+            # Kill remote rpicam-vid if possible
+            if self.ssh_client:
+                try:
+                    # Attempt to kill all rpicam-vid processes (safe for single-use)
+                    self.ssh_client.exec_command("pkill rpicam-vid")
+                except Exception:
+                    pass
+                self.ssh_client.close()
