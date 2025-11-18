@@ -1,14 +1,13 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field
 from typing import Optional, List, Tuple
 from pathlib import Path
 from datetime import datetime
+import lgpio
 import asyncio
-import time
+from time import sleep
 import subprocess
-import io
-import os
 
 app = FastAPI()
 
@@ -19,27 +18,18 @@ CAPTURE_DIR.mkdir(exist_ok=True)
 ## MODELS
 # Servo control request
 class ServoRequest(BaseModel):
-    angle: float = Field(..., ge=-1.0, le=1.0, description="Servo position (-1.0 to 1.0)")
+    angle: int = Field(..., ge=0, le=180, description="Servo position (0 to 180 degrees)")
 
 # Camera settings for capture
 class CameraSettings(BaseModel):
-    width: int = Field(1280, ge=320, le=1920)
-    height: int = Field(720, ge=240, le=1080)
-    framerate: int = Field(30, ge=1, le=60)
-
-# Stream settings    
-class StreamSettings(BaseModel):
-    width: int = Field(640, ge=320, le=1920)
-    height: int = Field(480, ge=240, le=1080)
-    framerate: int = Field(15, ge=1, le=30)
-    stream_port: int = Field(8554, ge=1024, le=65535)
-
+    width: int = Field(1536, ge=1536, le=4608)
+    height: int = Field(864, ge=864, le=2592)
+    
 # AI Analysis Result Models
 class DetectionData(BaseModel):
     label: str
     confidence: float
     bbox: List[int]  # [x, y, width, height]
-
 class AIAnalysisResult(BaseModel):
     timestamp: str
     device_id: str
@@ -51,20 +41,22 @@ class AIAnalysisResult(BaseModel):
 ## In-memory storage for analysis results (for demo purposes)
 analysis_history = []
 
-## SERVO CONTROL 
-# from gpiozero import Servo
-# from time import sleep
-# servo = Servo(17)
+## SERVO CONTROL
+HANDLE = lgpio.gpiochip_open(0) # Open GPIO chip 0
+lgpio.gpio_claim_output(HANDLE, 18)  # GPIO18 for servo PWM
 
-# @app.post("/servo/move")
-# async def move_servo(data: ServoRequest):
-#     """Move servo to normalized position (-1.0 to +1.0)"""
-#     try:
-#         servo.value = data.angle
-#         await asyncio.sleep(0.4)
-#         return {"status": "ok", "angle_set": data.angle}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Servo error: {str(e)}")
+# SERVO MOVE
+@app.post("/servo/move")
+async def move_servo(data: ServoRequest):
+    """Move servo to normalized position (0 to 180 degrees)"""
+    try:
+	    # set angle
+        duty = 5 + (data.angle / 180) * 5
+        lgpio.tx_pwm(HANDLE, 0, 50, duty)
+        await asyncio.sleep(0.4)
+        return {"status": "ok", "angle_set": data.angle}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Servo error: {str(e)}")
 
 # CAMERA CAPTURE (PHOTO)
 @app.post("/camera/stream/capture")
@@ -96,63 +88,15 @@ async def camera_capture(settings: Optional[CameraSettings] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# MJPEG STREAM
-@app.get("/camera/stream/mjpeg")
-def stream_mjpeg(width: int = 1280, height: int = 720, quality: int = 10):
-    """
-    MJPEG stream - funguje přímo v prohlížeči v <img> tagu
-    Příklad: <img src="http://raspi:8000/camera/stream/mjpeg">
-    """
-    
-    def generate_frames():
-        # Spustíme rpicam-vid s MJPEG výstupem
-        cmd = [
-            "rpicam-vid",
-            "-t", "0",              # Nekonečný stream
-            "-n",                   # Bez preview
-            "--width", str(width),
-            "--height", str(height),
-            "--codec", "mjpeg",     # MJPEG codec!
-            "-o", "-"               # Stdout
-        ]
-        
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=10**8
-        )
-        
-        try:
-            while True:
-                # Čteme data po velkých kusech
-                chunk = proc.stdout.read(4096)
-                
-                if not chunk:
-                    break
-                
-                # Multipart MIME boundary pro MJPEG
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + chunk + b'\r\n')
-        
-        finally:
-            proc.kill()
-            proc.wait()
-    
-    return StreamingResponse(
-        generate_frames(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
-
 # CAMERA STREAM (SNAPSHOT STREAM)
 @app.get("/camera/stream/snapshots")
-def stream_snapshots(width: int = 1280, height: int = 720, fps: int = 10):
+def stream_snapshots(width: int = 1536, height: int = 864, framerate: int = 30):
     """
     Stream jednotlivých JPEG snímků
     Spolehlivější než video stream
     """
     def generate_snapshots():
-        frame_delay = 1.0 / fps
+        frame_delay = 1.0 / framerate
         try:
             while True:
                 # Zachytíme jeden frame
@@ -166,7 +110,7 @@ def stream_snapshots(width: int = 1280, height: int = 720, fps: int = 10):
                     "-t", "1"  # Rychlé zachycení
                 ], capture_output=True, timeout=2)
                 if result.returncode != 0:
-                    time.sleep(frame_delay)
+                    sleep(frame_delay)
                     continue
                 # Načteme obrázek
                 with open(temp_img, 'rb') as f:
@@ -175,7 +119,7 @@ def stream_snapshots(width: int = 1280, height: int = 720, fps: int = 10):
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + 
                        frame_bytes + b'\r\n')
-                time.sleep(frame_delay)
+                sleep(frame_delay)
         except Exception as e:
             print(f"Stream error: {e}")
     return StreamingResponse(
@@ -198,42 +142,23 @@ async def camera_viewer():
     </head>
     <body>
         <h1>Raspberry Pi Camera Stream</h1>
-        <div class="info">
-            <h2>MJPEG Stream (doporučeno pro prohlížeč)</h2>
-            <button onclick="switchStream('mjpeg')">Zapnout MJPEG</button>
-            <button onclick="switchStream('snapshots')">Zapnout Snapshots</button>
-        </div> 
         <div class="stream-container">
-            <img id="stream" src="/camera/stream/mjpeg" alt="Camera Stream">
+            <img id="stream" src="/camera/stream/snapshots" alt="Camera Stream">
         </div> 
-        <div class="info">
-            <h3>Aktuální stream:</h3>
-            <p id="current-stream">/camera/stream/mjpeg</p>
-            <p><strong>Rozlišení:</strong> <span id="resolution">640x480</span></p>
-            <p><strong>Status:</strong> <span id="status">Running</span></p>
-        </div>
         <script>
             function switchStream(type) {
                 const streamImg = document.getElementById('stream');
                 const currentStream = document.getElementById('current-stream');
-          
                 const streamUrl = `/camera/stream/${type}`;
                 streamImg.src = streamUrl;
                 currentStream.textContent = streamUrl;
-                
                 console.log('Switching to:', streamUrl);
             } 
             // Kontrola stavu streamu
             const streamImg = document.getElementById('stream');
             const status = document.getElementById('status');
-            streamImg.onload = () => {
-                status.textContent = 'Running';
-                status.style.color = '#4CAF50';
-            };
-            streamImg.onerror = () => {
-                status.textContent = 'Error';
-                status.style.color = '#f44336';
-            };
+            streamImg.onload = () => { status.textContent = 'Running'; status.style.color = '#4CAF50'; };
+            streamImg.onerror = () => { status.textContent = 'Error'; status.style.color = '#f44336'; };
         </script>
     </body>
     </html>
