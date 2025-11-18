@@ -1,0 +1,616 @@
+from __future__ import annotations
+import os
+import subprocess
+import sys
+
+# Auto-install/upgrade runtime dependencies used by this module.
+# To skip automatic installation set environment variable SKIP_DEP_INSTALL=1
+
+if os.environ.get("SKIP_DEP_INSTALL") != "1":
+    packages = [
+        "numpy",
+        "opencv-python",
+        "yt-dlp",
+        "paramiko",
+    ]
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + packages)
+
+        # If running on a Raspberry Pi, include picamera2
+        try:
+            is_rpi = False
+            # Prefer reading device-tree model which exists on RPi
+            try:
+                with open("/proc/device-tree/model", "r") as f:
+                    if "Raspberry Pi" in f.read():
+                        is_rpi = True
+            except Exception:
+                pass
+
+            if is_rpi and "picamera2" not in packages:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "picamera2"])
+                from picamera2 import Picamera2
+        except Exception:
+            pass
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to install/upgrade packages: {e}", file=sys.stderr)
+
+from typing import Iterator
+import cv2 as cv
+import numpy as np
+from abc import ABC, abstractmethod
+import threading
+import time
+import yt_dlp
+import paramiko
+
+class FrameBuffer:
+    def __init__(self, capacity: int, frame_shape: tuple[int, ...], frame_dtype: type = np.uint8) -> None:
+        """
+        Initializes the buffer.
+        
+        :param capacity: Number of frames to keep
+        :param frame_shape: Shape of each frame (height, width, channels)
+        :param frame_dtype: Data type of the frames (default uint8 for CV2)
+        """
+        self.capacity: int = capacity
+        self.frame_shape: tuple[int, ...] = frame_shape
+        self.frame_dtype: type = frame_dtype
+        self.buffer: np.ndarray = np.zeros((capacity, *frame_shape), dtype=frame_dtype)
+        self.index: int = 0
+        self.full: bool = False
+        self._lock = threading.Lock()
+
+    def add_frame(self, frame: np.ndarray) -> None:
+        """
+        Adds a new frame to the buffer, overwriting the oldest if full.
+        """
+        with self._lock:
+            if frame.shape != self.frame_shape:
+                raise ValueError(f"Frame shape {frame.shape} does not match buffer shape {self.frame_shape}")
+            
+            self.buffer[self.index] = frame
+            self.index = (self.index + 1) % self.capacity
+            if self.index == 0:
+                self.full = True
+
+    def get(self, i: int) -> np.ndarray:
+        """
+        Returns the i-th oldest frame (0 is oldest).
+        """
+        with self._lock:
+            if self.full:
+                if i < 0 or i >= self.capacity:
+                    raise IndexError("Index out of range")
+                real_index: int = (self.index + i) % self.capacity
+                return self.buffer[real_index]
+            else:
+                if i < 0 or i >= self.index:
+                    raise IndexError("Index out of range")
+                return self.buffer[i]
+
+    def __len__(self) -> int:
+        """
+        Returns the number of frames currently in the buffer.
+        """
+        return self.capacity if self.full else self.index
+
+    def __getitem__(self, i: int) -> np.ndarray:
+        """
+        Allows indexing like buffer[i] to get the i-th oldest frame.
+        """
+        return self.get(i)
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        """
+        Iterates over frames from oldest to newest.
+        """
+        for i in range(len(self)):
+            yield self.get(i)
+
+class CameraOpenError(Exception):
+    """Raised when the requested camera/video source cannot be opened.
+
+    Stores details about the attempt so callers can inspect/log them.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        src: int | str | None = None,
+        api: int | None = None,
+        last_error: Exception | str | None = None,
+    ):
+        # Allow legacy use: CameraOpenError("Error: cannot open camera")
+        self.message = message or "Failed to open camera/video source"
+        self.src = src
+        self.api = api
+        self.last_error = last_error
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        parts = [self.message]
+        if self.src is not None:
+            parts.append(f"src={self.src!r}")
+        if self.api is not None:
+            parts.append(f"api={self.api!r}")
+        if self.last_error is not None:
+            parts.append(f"last_error={self.last_error!r}")
+        return " | ".join(parts)
+
+    def to_dict(self) -> dict:
+        """Return a serializable representation of the error details."""
+        return {
+            "message": self.message,
+            "src": self.src,
+            "api": self.api,
+            "last_error": repr(self.last_error),
+        }
+
+    def __str__(self) -> str:
+        return self._build_message()
+
+class VideoStreamListener(ABC):
+    def __init__(self):
+        pass
+
+    @abstractmethod
+    def on_frame(self, frame: np.ndarray, formatted_frame: np.ndarray, stream: VideoStream) -> None:
+        """Called when a new frame is available."""
+        pass
+
+class VideoStreamFormatterStrategy(ABC):
+    def __init__(self):
+        self.next: VideoStreamFormatterStrategy | None = None
+
+    def append_chain(self, strategy: VideoStreamFormatterStrategy) -> VideoStreamFormatterStrategy:
+        """Appends a strategy to the end of the chain."""
+        if self.next is None:
+            self.next = strategy
+        else:
+            self.next.append(strategy)
+        return self
+    
+    def remove_next(self) -> None:
+        """Removes the next strategy in the chain."""
+        if self.next is not None:
+            self.next = self.next.next
+    
+    def insert_chain(self, strategy: VideoStreamFormatterStrategy) -> VideoStreamFormatterStrategy:
+        """Inserts a strategy immediately after this one in the chain."""
+        strategy.next = self.next
+        self.next = strategy
+        return strategy
+    
+    def apply(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        image = self.format(frame, stream)
+        if self.next is not None:
+            image = self.next.format(image, stream)
+        return image
+
+    @abstractmethod
+    def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        pass
+
+    @classmethod
+    def resize_strategy(cls, size: int | tuple[int, int], interpolation: int = cv.INTER_AREA) -> '_ResizeStrategy':
+        return _ResizeStrategy(size, interpolation)
+
+    @classmethod
+    def gray_scale_strategy(cls) -> '_GrayScaleStrategy':
+        return _GrayScaleStrategy()
+
+class _ResizeStrategy(VideoStreamFormatterStrategy):
+    """
+    Resize frames to a fixed (width, height) provided in the constructor,
+    scaling to cover the target area and center-cropping the excess.
+
+    :param size: (width, height) tuple or single int (square size)
+    :param interpolation: OpenCV interpolation flag (default cv.INTER_AREA)
+    """
+    def __init__(self, size: int | tuple[int, int], interpolation: int = cv.INTER_AREA) -> None:
+        super().__init__()
+        if isinstance(size, int):
+            self.size = (size, size)
+        else:
+            self.size = tuple(size)
+            if len(self.size) != 2:
+                raise ValueError("size must be an int or a (width, height) tuple")
+        # store as (width, height) to match cv.resize dsize
+        self.interpolation = interpolation
+
+    def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        # frame.shape -> (h, w) or (h, w, c)
+        h, w = frame.shape[:2]
+        target_w, target_h = self.size
+
+        # scale to cover the target area (like CSS 'cover')
+        scale_w = target_w / w
+        scale_h = target_h / h
+        scale = max(scale_w, scale_h)
+
+        new_w = int(np.ceil(w * scale))
+        new_h = int(np.ceil(h * scale))
+
+        # resize first
+        resized = cv.resize(frame, dsize=(new_w, new_h), interpolation=self.interpolation)
+
+        # center-crop to the exact target size
+        x0 = (new_w - target_w) // 2
+        y0 = (new_h - target_h) // 2
+        x1 = x0 + target_w
+        y1 = y0 + target_h
+
+        # handle possible 2D (grayscale) or 3D arrays
+        if resized.ndim == 2:
+            cropped = resized[y0:y1, x0:x1]
+        else:
+            cropped = resized[y0:y1, x0:x1, ...]
+
+        return cropped
+
+class _GrayScaleStrategy(VideoStreamFormatterStrategy):
+    """
+    Convert frames to grayscale.
+    """
+    def __init__(self) -> None:
+        super().__init__()
+
+    def format(self, frame: np.ndarray, stream: VideoStream) -> np.ndarray:
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        return cv.cvtColor(gray, cv.COLOR_GRAY2BGR)
+
+class VideoStream:
+    def __init__(self, video_provider: VideoProvider, buffer_size: int = 10, threaded: bool = False, thread_frequency: float = 0.01, format_strategy: VideoStreamFormatterStrategy = None):
+        self._video_provider: VideoProvider = video_provider
+        self._frame_shape: np.ndarray = None
+        self._frame_buffer: FrameBuffer = None
+        self._formatted_buffer: FrameBuffer = None
+        self._format_strategy: VideoStreamFormatterStrategy = format_strategy
+        self._listeners: list[VideoStreamListener] = []
+        self._buffer_size: int = buffer_size
+        self._thread_frequency: float = thread_frequency
+        self._thread: threading.Thread = None if not threaded else threading.Thread(target=self._threaded_update, daemon=True)
+        if threaded:
+            self._thread.start()
+    
+    @property
+    def is_file(self):
+        return isinstance(self.device_name, str) and self.device_name != ""
+    
+    def is_threaded(self):
+        return self._thread is not None
+    
+    def thread_frequency(self):
+        return self._thread_frequency
+
+    @property
+    def frame_shape(self):
+        return self._frame_shape
+    
+    @property
+    def has_source_ended(self):
+        return not self._video_provider.is_active()
+    
+    @property
+    def device_name(self):
+        return self.cap.getBackendName()
+    
+    @property
+    def frame_buffer(self):
+        return self._frame_buffer
+    
+    @property
+    def formatted_buffer(self):
+        return self._formatted_buffer
+    
+    def _threaded_update(self):
+        while True:
+            self.update()
+            time.sleep(self._thread_frequency)
+
+    def update(self):
+        frame = self._video_provider.read()
+
+        if frame is None:
+            return
+        formatted_frame = self._format_strategy.apply(frame, self) if self._format_strategy else frame
+        if self._formatted_buffer is None:
+            self._formatted_buffer = FrameBuffer(capacity=self._buffer_size, frame_shape=formatted_frame.shape)
+        if self._frame_shape is None:
+            self._frame_shape = frame.shape
+        if self._frame_buffer is None:
+            self._frame_buffer = FrameBuffer(capacity=self._buffer_size, frame_shape=self.frame_shape)
+
+        self._frame_buffer.add_frame(frame)
+        self.formatted_buffer.add_frame(formatted_frame)
+        for listener in self._listeners:
+            if isinstance(listener, VideoStreamListener):
+                listener.on_frame(frame, formatted_frame, self)
+            else:
+                self._listeners.remove(listener)
+    
+    def add_listener(self, listener: VideoStreamListener) -> None:
+        self._listeners.append(listener)
+    
+    def remove_listener(self, listener: VideoStreamListener) -> None:
+        self._listeners.remove(listener)
+
+    def release(self):
+        self.cap.release()
+        cv.destroyAllWindows()
+
+class VideoProvider(ABC):
+    @abstractmethod
+    def read(self) -> np.ndarray:
+        pass
+
+    @abstractmethod
+    def get_name(self) -> str:
+        pass
+
+    @abstractmethod
+    def is_active(self) -> bool:
+        pass
+
+class CameraVideoProvider(VideoProvider):
+    WINDOWS_CAMERA: int = cv.CAP_DSHOW
+    def __init__(self, src: int | str = 0, api: int = WINDOWS_CAMERA):
+        self.cap = cv.VideoCapture(src, api)
+        if not self.cap.isOpened():
+            raise CameraOpenError(src=src, api=api)
+    
+    def get_name(self) -> str:
+        return self.cap.getBackendName()
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+class FileVideoProvider(VideoProvider):
+    def __init__(self, filepath: str):
+        self.cap = cv.VideoCapture(filepath)
+        if not self.cap.isOpened():
+            raise CameraOpenError(src=filepath)
+    
+    def get_name(self) -> str:
+        return self.cap.getBackendName()
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+class YouTubeVideoProvider(VideoProvider):
+    def __init__(self, url: str):
+        self.url = url
+        self.video_url = self._get_stream_url(url)
+        self.cap = cv.VideoCapture(self.video_url)
+        if not self.cap.isOpened():
+            raise CameraOpenError("YouTube stream couldn't be opened.", src=url)
+    
+    def _get_stream_url(self, url: str) -> str:
+        """Extract the direct video stream URL using yt_dlp."""
+        ydl_opts = {'format': 'best', 'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info['url']
+    
+    def _download_video(self, save_path: str) -> str:
+        """Download the YouTube video and return the local filepath."""
+        os.makedirs(save_path, exist_ok=True)
+        ydl_opts = {
+            'format': 'best[ext=mp4][height<=720]',
+            'outtmpl': os.path.join(save_path, '%(title)s.%(ext)s'),
+            'quiet': True
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(self.url, download=True)
+            return ydl.prepare_filename(info)
+    
+    def get_name(self) -> str:
+        return f"YouTube: {self.url}"
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+
+class RemoteRaspberryPiCameraProvider(VideoProvider):
+    """
+    VideoProvider that connects via SSH to Raspberry Pi, starts rpicam-vid stream,
+    and then connects to the TCP stream using OpenCV.
+    """
+    def __init__(self,
+        raspberry_ip: str,
+        raspberry_user: str,
+        raspberry_password: str | None = None,
+        ssh_key_path: str | None = None,
+        stream_port: int = 8554,
+        resolution: tuple[int, int] = (640, 480),
+        framerate: int = 30,
+        stream_command: str | None = None
+    ):
+    
+        """
+        Initialize remote Raspberry Pi stream.
+        :param raspberry_ip: IP address or hostname of Raspberry Pi (e.g., "192.168.37.141" or "raspberrypi.local")
+        :param raspberry_user: SSH username (e.g., "imang")
+        :param raspberry_password: SSH password (optional if using SSH key)
+        :param ssh_key_path: Path to SSH private key (optional if using password)
+        :param stream_port: TCP port for the stream (default 8554)
+        :param resolution: Video resolution as (width, height)
+        :param framerate: Frames per second
+        :param stream_command: Custom rpicam-vid command (if None, uses default)
+        """
+        self.raspberry_ip = raspberry_ip
+        self.raspberry_user = raspberry_user
+        self.raspberry_password = raspberry_password
+        self.ssh_key_path = ssh_key_path
+        self.stream_port = stream_port
+        self.resolution = resolution
+        self.framerate = framerate
+        # Build stream command if not provided
+        if stream_command is None:
+            w, h = self.resolution
+            self.stream_command = (
+                f"rpicam-vid -t 0 --inline --listen -n "
+                f"--width {w} --height {h} --framerate {self.framerate} "
+                f"-o tcp://0.0.0.0:{self.stream_port}"
+            )
+        else:
+            self.stream_command = stream_command
+
+        # placeholders for connection resources (to be used by connection/cleanup methods)
+        self.ssh = None
+        self.channel = None
+        self.cap = None
+        # Start the connection
+        self._connect()
+    def _connect(self):
+        """Establish SSH connection and start the stream."""
+        try:
+            # Create SSH client
+            self.ssh = paramiko.SSHClient()
+            self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            print(f"[RemoteRPi] Connecting to {self.raspberry_ip}...")
+            # Connect with password or SSH key
+            if self.ssh_key_path:
+                self.ssh.connect(self.raspberry_ip, username=self.raspberry_user, key_filename=self.ssh_key_path)
+            elif self.raspberry_password:
+                self.ssh.connect(self.raspberry_ip, username=self.raspberry_user, password=self.raspberry_password)
+            else:
+                raise ValueError("Either raspberry_password or ssh_key_path must be provided")
+            
+            print(f"[RemoteRPi] Starting stream: {self.stream_command}")
+            # Start the stream command
+            self.channel = self.ssh.get_transport().open_session()
+            self.channel.exec_command(self.stream_command)
+            # Wait for stream to initialize
+            print("[RemoteRPi] Waiting for stream to initialize...")
+            time.sleep(3)
+            # Connect to the TCP stream
+            stream_url = f"tcp://{self.raspberry_ip}:{self.stream_port}"
+            print(f"[RemoteRPi] Connecting to stream: {stream_url}")
+            self.cap = cv.VideoCapture(stream_url, cv.CAP_FFMPEG)
+            
+            if not self.cap.isOpened():
+                raise CameraOpenError("Failed to open remote Raspberry Pi stream",src=stream_url)
+            
+            print("[RemoteRPi] Stream successfully connected!")
+            
+        except Exception as e:
+            self._cleanup()
+            raise CameraOpenError("Failed to connect to remote Raspberry Pi", src=self.raspberry_ip, last_error=str(e))
+    def _cleanup(self):
+        """Clean up SSH and video capture resources."""
+        if self.cap is not None and self.cap.isOpened():
+            self.cap.release()
+        
+        if self.channel is not None and not self.channel.closed:
+            # Send Ctrl+C to stop the stream
+            try:
+                self.channel.send(b'\x03')
+                time.sleep(0.5)
+                self.channel.close()
+            except:
+                pass
+        
+        if self.ssh is not None:
+            try:
+                self.ssh.close()
+            except:
+                pass
+    def get_name(self) -> str:
+        return f"Remote Raspberry Pi Stream ({self.raspberry_ip}:{self.stream_port})"
+    def is_active(self) -> bool:
+        return self.cap is not None and self.cap.isOpened()
+    def read(self) -> np.ndarray:
+        if not self.is_active():
+            return None
+        
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+    def release(self):
+        """Release all resources and stop the remote stream."""
+        print("[RemoteRPi] Releasing resources...")
+        self._cleanup()
+        print("[RemoteRPi] Connection closed.")
+    
+    def __del__(self):
+        """Ensure cleanup on object destruction."""
+        self._cleanup()
+
+# TODO: Needs Testing
+class OnboardRaspberryPiCameraProvider(VideoProvider):
+    def __init__(self, resolution: tuple[int, int] = (640, 480), framerate: int = 30):
+        self.picam2 = Picamera2()
+        config = self.picam2.create_still_configuration(main={"format": "BGR888"})
+        self.picam2.configure(config)
+        self.picam2.start()
+        self.resolution = resolution
+        self.framerate = framerate
+    
+    def get_name(self) -> str:
+        return "Onboard Raspberry Pi Camera"
+    
+    def is_active(self) -> bool:
+        return True
+    
+    def read(self) -> np.ndarray:
+        frame = self.picam2.capture_array()
+        return frame
+
+# TODO: Needs Testing
+class RTPSStream(VideoStreamListener):
+    """Streams formatted video frames over RTP using OpenCV's VideoWriter. Always outputs the lastest frame on new frame."""
+    def __init__(self, stream: VideoStream, rtp_address: str = "rtp://127.0.0.1:8554"):
+        self.stream = stream
+        self.rtp_address = rtp_address
+        self.writer = None
+        stream.add_listener(self)
+    def on_frame(self, frame: np.ndarray, formatted_frame: np.ndarray, stream: VideoStream) -> None:
+        if self.writer is None:
+            fourcc = cv.VideoWriter_fourcc(*'H264')
+            fps = 30
+            h, w = formatted_frame.shape[:2]
+            self.writer = cv.VideoWriter(self.rtp_address, fourcc, fps, (w, h))
+        self.writer.write(formatted_frame)
+
+# TODO: Needs Testing
+class RTPSVideoProvider(VideoProvider):
+    """VideoProvider that reads from an RTP stream using OpenCV."""
+    def __init__(self, rtp_address: str = "rtp://127.0.0.1:8554"):
+        self.rtp_address = rtp_address
+        self.cap = cv.VideoCapture(self.rtp_address, cv.CAP_FFMPEG)
+        if not self.cap.isOpened():
+            raise CameraOpenError("Failed to open RTP stream", src=rtp_address)
+
+    def get_name(self) -> str:
+        return f"RTP Stream ({self.rtp_address})"
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
+    

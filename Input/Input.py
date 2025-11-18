@@ -1,4 +1,40 @@
 from __future__ import annotations
+import os
+import subprocess
+import sys
+
+# Auto-install/upgrade runtime dependencies used by this module.
+# To skip automatic installation set environment variable SKIP_DEP_INSTALL=1
+
+if os.environ.get("SKIP_DEP_INSTALL") != "1":
+    packages = [
+        "numpy",
+        "opencv-python",
+        "yt-dlp",
+        "paramiko",
+    ]
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + packages)
+
+        # If running on a Raspberry Pi, include picamera2
+        try:
+            is_rpi = False
+            # Prefer reading device-tree model which exists on RPi
+            try:
+                with open("/proc/device-tree/model", "r") as f:
+                    if "Raspberry Pi" in f.read():
+                        is_rpi = True
+            except Exception:
+                pass
+
+            if is_rpi and "picamera2" not in packages:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "picamera2"])
+                from picamera2 import Picamera2
+        except Exception:
+            pass
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to install/upgrade packages: {e}", file=sys.stderr)
+
 from typing import Iterator
 import cv2 as cv
 import numpy as np
@@ -6,8 +42,6 @@ from abc import ABC, abstractmethod
 import threading
 import time
 import yt_dlp
-import os
-#from picamera2 import Picamera2
 import paramiko
 
 class FrameBuffer:
@@ -396,44 +430,7 @@ class YouTubeVideoProvider(VideoProvider):
             return None
         return frame
 
-class RaspberryPiCameraProvider(VideoProvider):
-    """
-    VideoProvider for Raspberry Pi using OpenCV's libcamera (v4l2) backend.
-    Works even if picamera2 is unavailable, as long as /dev/video0 exists.
-    """
-
-    def __init__(self, device_index: int = 0, resolution: tuple[int, int] = (1280, 720), framerate: int = 30):
-        self.device_index = device_index
-        self.resolution = resolution
-        self.framerate = framerate
-
-        # Try to open via v4l2/libcamera backend
-        self.cap = cv.VideoCapture(device_index, cv.CAP_V4L2)
-        if not self.cap.isOpened():
-            raise CameraOpenError("Cannot open Raspberry Pi camera", src=device_index, api=cv.CAP_V4L2)
-
-        # Try to apply settings if supported
-        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, resolution[0])
-        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, resolution[1])
-        self.cap.set(cv.CAP_PROP_FPS, framerate)
-
-    def get_name(self) -> str:
-        return f"Raspberry Pi Camera (/dev/video{self.device_index})"
-
-    def is_active(self) -> bool:
-        return self.cap.isOpened()
-
-    def read(self) -> np.ndarray:
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
-
-    def release(self):
-        if self.cap.isOpened():
-            self.cap.release()
-
-class RemoteRaspberryPiStreamProvider(VideoProvider):
+class RemoteRaspberryPiCameraProvider(VideoProvider):
     """
     VideoProvider that connects via SSH to Raspberry Pi, starts rpicam-vid stream,
     and then connects to the TCP stream using OpenCV.
@@ -448,6 +445,7 @@ class RemoteRaspberryPiStreamProvider(VideoProvider):
         framerate: int = 30,
         stream_command: str | None = None
     ):
+    
         """
         Initialize remote Raspberry Pi stream.
         :param raspberry_ip: IP address or hostname of Raspberry Pi (e.g., "192.168.37.141" or "raspberrypi.local")
@@ -468,17 +466,21 @@ class RemoteRaspberryPiStreamProvider(VideoProvider):
         self.framerate = framerate
         # Build stream command if not provided
         if stream_command is None:
-            self.stream_command = f"rpicam-vid -t 0 --inline --listen -n --width {resolution[0]} --height {resolution[1]} --framerate {framerate} -o tcp://0.0.0.0:{stream_port}"
+            w, h = self.resolution
+            self.stream_command = (
+                f"rpicam-vid -t 0 --inline --listen -n "
+                f"--width {w} --height {h} --framerate {self.framerate} "
+                f"-o tcp://0.0.0.0:{self.stream_port}"
+            )
         else:
             self.stream_command = stream_command
-        # SSH connection and channel
+
+        # placeholders for connection resources (to be used by connection/cleanup methods)
         self.ssh = None
         self.channel = None
-        # OpenCV capture
         self.cap = None
         # Start the connection
         self._connect()
-    
     def _connect(self):
         """Establish SSH connection and start the stream."""
         try:
@@ -514,7 +516,6 @@ class RemoteRaspberryPiStreamProvider(VideoProvider):
         except Exception as e:
             self._cleanup()
             raise CameraOpenError("Failed to connect to remote Raspberry Pi", src=self.raspberry_ip, last_error=str(e))
-    
     def _cleanup(self):
         """Clean up SSH and video capture resources."""
         if self.cap is not None and self.cap.isOpened():
@@ -534,13 +535,10 @@ class RemoteRaspberryPiStreamProvider(VideoProvider):
                 self.ssh.close()
             except:
                 pass
-    
     def get_name(self) -> str:
         return f"Remote Raspberry Pi Stream ({self.raspberry_ip}:{self.stream_port})"
-    
     def is_active(self) -> bool:
         return self.cap is not None and self.cap.isOpened()
-    
     def read(self) -> np.ndarray:
         if not self.is_active():
             return None
@@ -549,7 +547,6 @@ class RemoteRaspberryPiStreamProvider(VideoProvider):
         if not ret:
             return None
         return frame
-    
     def release(self):
         """Release all resources and stop the remote stream."""
         print("[RemoteRPi] Releasing resources...")
@@ -560,54 +557,57 @@ class RemoteRaspberryPiStreamProvider(VideoProvider):
         """Ensure cleanup on object destruction."""
         self._cleanup()
 
-class RaspberryPiStream(VideoProvider):
-    """
-    VideoProvider for Raspberry Pi using OpenCV's libcamera (v4l2) backend.
-    Works even if picamera2 is unavailable, as long as /dev/video0 exists.
-    """
-    def __init__(self, raspberry_ip: str, stream_port: int = 8554, resolution: tuple[int, int] = (1280, 720), framerate: int = 30):
-        self.raspberry_ip = raspberry_ip
-        self.stream_port = stream_port
+class OnboardRaspberryPiCameraProvider(VideoProvider):
+    def __init__(self, resolution: tuple[int, int] = (640, 480), framerate: int = 30):
+        self.picam2 = Picamera2()
+        config = self.picam2.create_still_configuration(main={"format": "BGR888"})
+        self.picam2.configure(config)
+        self.picam2.start()
         self.resolution = resolution
         self.framerate = framerate
-         
-        stream_url = f"tcp://{self.raspberry_ip}:{self.stream_port}"
-        print(f"[RemoteRPi] Connecting to stream: {stream_url}")
-        self.cap = cv.VideoCapture(stream_url, cv.CAP_FFMPEG)    
-        if not self.cap.isOpened():
-            raise CameraOpenError("Cannot open Raspberry Pi camera")
-
-        # Try to apply settings if supported
-        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, resolution[0])
-        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, resolution[1])
-        self.cap.set(cv.CAP_PROP_FPS, framerate)
-
-    def _cleanup(self):
-        """Clean up SSH and video capture resources."""
-        if self.cap is not None and self.cap.isOpened():
-            self.cap.release()
-        
+    
     def get_name(self) -> str:
-        return f"Remote Raspberry Pi Stream ({self.raspberry_ip}:{self.stream_port})"
+        return "Onboard Raspberry Pi Camera"
     
     def is_active(self) -> bool:
-        return self.cap is not None and self.cap.isOpened()
+        return True
     
     def read(self) -> np.ndarray:
-        if not self.is_active():
-            return None
-        
+        frame = self.picam2.capture_array()
+        return frame
+
+class RTPSStream(VideoStreamListener):
+    """Streams formatted video frames over RTP using OpenCV's VideoWriter. Always outputs the lastest frame on new frame."""
+    def __init__(self, stream: VideoStream, rtp_address: str = "rtp://127.0.0.1:8554"):
+        self.stream = stream
+        self.rtp_address = rtp_address
+        self.writer = None
+        stream.add_listener(self)
+    def on_frame(self, frame: np.ndarray, formatted_frame: np.ndarray, stream: VideoStream) -> None:
+        if self.writer is None:
+            fourcc = cv.VideoWriter_fourcc(*'H264')
+            fps = 30
+            h, w = formatted_frame.shape[:2]
+            self.writer = cv.VideoWriter(self.rtp_address, fourcc, fps, (w, h))
+        self.writer.write(formatted_frame)
+
+class RTPSVideoProvider(VideoProvider):
+    """VideoProvider that reads from an RTP stream using OpenCV."""
+    def __init__(self, rtp_address: str = "rtp://127.0.0.1:8554"):
+        self.rtp_address = rtp_address
+        self.cap = cv.VideoCapture(self.rtp_address, cv.CAP_FFMPEG)
+        if not self.cap.isOpened():
+            raise CameraOpenError("Failed to open RTP stream", src=rtp_address)
+
+    def get_name(self) -> str:
+        return f"RTP Stream ({self.rtp_address})"
+    
+    def is_active(self) -> bool:
+        return self.cap.isOpened()
+    
+    def read(self) -> np.ndarray:
         ret, frame = self.cap.read()
         if not ret:
             return None
         return frame
     
-    def release(self):
-        """Release all resources and stop the remote stream."""
-        print("[RemoteRPi] Releasing resources...")
-        self._cleanup()
-        print("[RemoteRPi] Connection closed.")
-    
-    def __del__(self):
-        """Ensure cleanup on object destruction."""
-        self._cleanup()
