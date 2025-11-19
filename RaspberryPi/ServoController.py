@@ -3,42 +3,64 @@ import time
 import lgpio
 
 class ServoController:
-    def __init__(self, gpio_pin):
-        self.gpio_pin = gpio_pin
-        self.handle = lgpio.gpiochip_open(0)
-        lgpio.gpio_claim_output(self.handle, gpio_pin, 1500)  # Set initial position to 1500us
+    def __init__(self, gpio_pin=18):
+        self.gpio_pin = 18  # GPIO18 = physical pin 12
+        self.chip = lgpio.gpiochip_open(0)  # main GPIO chip
+        self.position = 0
+        self.handle = lgpio.gpio_claim_output(self.chip, self.gpio_pin)
+        print(f"Initialized ServoController on GPIO pin {self.gpio_pin}.")
 
-    def set_angle(self, angle):
-        # Convert angle (0-180) to pulse width (500-2500us)
-        pulse_width = int(500 + (angle / 180.0) * 2000)
-        lgpio.gpio_write(self.handle, self.gpio_pin, pulse_width)
+    def set_position(self, frequency, position):
+        lgpio.tx_servo(self.handle, self._position_to_duty_cycle(position))
+        print(f"Set servo to position {position}° with frequency {frequency}Hz.")
 
-    def cleanup(self):
-        lgpio.gpio_free(self.handle, self.gpio_pin)
-        lgpio.gpiochip_close(self.handle)
+    def _position_to_duty_cycle(self, position):
+        return 10 + (position / 180) * 10
+    
+    def stop(self):
+        lgpio.tx_pwm(self.chip, self.gpio_pin, self.frequency)
+        print("Stopped PWM signal to servo.")
+    
+    def close(self):
+        lgpio.gpiochip_close(self.chip)
+        print("Closed GPIO chip.")
+    
+    def __enter__(self):
+        return self
 
-class ServoTest:
-    def __init__(self, servo: ServoController):
-        self.servo = servo
-
-    def run_test(self):
+    def __exit__(self, exc_type, exc_value, tb):
+        # best-effort stop of PWM, then close resources
         try:
-            for angle in range(0, 181, 90):
-                print(f"Setting angle to {angle}")
-                self.servo.set_angle(angle)
-                time.sleep(0.5)
-            for angle in range(180, -1, -90):
-                print(f"Setting angle to {angle}")
-                self.servo.set_angle(angle)
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            pass
+            if getattr(self, "chip", None) is not None and getattr(self, "gpio_pin", None) is not None:
+                try:
+                    lgpio.tx_pwm(self.chip, self.gpio_pin, 0, 0)
+                except Exception:
+                    pass
         finally:
-            self.servo.cleanup()
+            try:
+                self.close()
+            except Exception:
+                pass
+        return False
+
+    def __del__(self):
+        # ensure resources are released on deletion (best-effort, suppress errors during interpreter shutdown)
+        try:
+            if getattr(self, "chip", None) is not None and getattr(self, "gpio_pin", None) is not None:
+                try:
+                    lgpio.tx_pwm(self.chip, self.gpio_pin, 0, 0)
+                except Exception:
+                    pass
+                try:
+                    self.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 if __name__ == "__main__":
-    print(sys.argv)
-    pin = sys.argv[1] if len(sys.argv) > 1 else "17"
-    servo = ServoController(gpio_pin=int(pin))
-    test = ServoTest(servo)
-    test.run_test()
+    controller = ServoController()
+    controller.set_position(50, 0)  # middle position
+    time.sleep(1)
+    controller.set_position(50, 50)  # middle position
+    time.sleep(1)
