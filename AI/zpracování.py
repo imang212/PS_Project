@@ -539,3 +539,4 @@ if cap:
         cv2.destroyAllWindows()
         print("[INFO] Detekce YouTube dokončena.")
 
+
