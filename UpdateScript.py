@@ -1,3 +1,17 @@
+#!/usr/bin/env python3
+"""
+UpdateScript.py
+
+Upload the local RaspberryPi folder (default: this script's directory/RaspberryPi) to a Raspberry Pi over SSH/SFTP.
+
+Usage examples:
+    python UpdateScript.py --host 192.168.1.50 --user pi --remote /home/pi/project
+    python UpdateScript.py --host pi.example.com --user pi --remote /opt/myapp --key /home/user/.ssh/id_rsa
+
+This script uses Paramiko (pip install paramiko). It will try key-based auth first (agent/keys),
+or use the --key file if supplied, or prompt for a password.
+"""
+
 import argparse
 import getpass
 import os
@@ -12,38 +26,37 @@ DEFAULT_IP = "192.168.37.205"
 DEFAULT_NAME = "imang"
 DEFAULT_PASSWORD = "imang"
 REMOTE_LOCATION = f"/home/{DEFAULT_NAME}/NightshadeAria/RaspberryPi"
+# Local source folder to upload (by default a "RaspberryPi" subfolder next to this script)
+SOURCE_LOCATION = os.path.join(os.path.dirname(os.path.abspath(__file__)), "RaspberryPi")
 
-#!/usr/bin/env python3
-"""
-UpdateScript.py
-
-Upload the local RaspberryPi folder (default: this script's directory) to a Raspberry Pi over SSH/SFTP.
-
-Usage examples:
-        python UpdateScript.py --host 192.168.1.50 --user pi --remote /home/pi/project
-        python UpdateScript.py --host pi.example.com --user pi --remote /opt/myapp --key /home/user/.ssh/id_rsa
-
-This script uses Paramiko (pip install paramiko). It will try key-based auth first (agent/keys),
-or use the --key file if supplied, or prompt for a password.
-"""
 
 def parse_args():
     p = argparse.ArgumentParser(description="Upload a local folder to a Raspberry Pi via SFTP")
     p.add_argument("--host", default=DEFAULT_IP, help="Raspberry Pi hostname or IP (default from DEFAULT_IP)")
     p.add_argument("--user", default=DEFAULT_NAME, help="SSH username (default: current user or DEFAULT_NAME)")
     p.add_argument("--port", type=int, default=22, help="SSH port (default: 22)")
-    p.add_argument("--local", default=os.path.dirname(os.path.abspath(__file__)),
-                   help="Local folder to upload (default: this script's directory)")
+    p.add_argument(
+        "--local",
+        default=SOURCE_LOCATION,
+        help="Local folder to upload (default: the 'RaspberryPi' folder next to this script)"
+    )
     p.add_argument("--remote", help="Remote destination folder on the Pi (default: /home/<user>/<local_folder_basename>)")
     p.add_argument("--key", help="Path to private key file (optional)")
-    p.add_argument("--password", default=DEFAULT_PASSWORD, help="Password (optional). If omitted and no key, you'll be prompted.")
-    p.add_argument("--preserve-perms", action="store_true",
-                   help="Try to preserve file permissions when uploading (best-effort)")
+    p.add_argument(
+        "--password",
+        default=DEFAULT_PASSWORD,
+        help="Password (optional). If omitted and no key, you'll be prompted."
+    )
+    p.add_argument(
+        "--preserve-perms",
+        action="store_true",
+        help="Try to preserve file permissions when uploading (best-effort)"
+    )
     return p.parse_args()
 
 
 def sftp_mkdirs(sftp, remote_path):
-    # Create remote directories recursively (like mkdir -p)
+    """Create remote directories recursively (like mkdir -p)"""
     dirs = []
     head = remote_path
     while head not in ("", "/"):
@@ -61,7 +74,7 @@ def sftp_mkdirs(sftp, remote_path):
 
 
 def upload_directory(sftp, local_dir, remote_dir, preserve_perms=False):
-    local_dir = os.path.join(os.path.abspath(local_dir), "RaspberryPi")
+    local_dir = os.path.abspath(local_dir)
     if not os.path.isdir(local_dir):
         raise ValueError(f"Local path is not a directory: {local_dir}")
 
@@ -112,12 +125,8 @@ def main():
     args = parse_args()
     local_dir = args.local
 
-    # If remote not specified, default to /home/<user>/<basename_of_local_dir>
-    if not args.remote:
-        base = os.path.basename(os.path.abspath(local_dir)) or "upload"
-        remote_dir = REMOTE_LOCATION
-    else:
-        remote_dir = args.remote
+    # If remote not specified, default to REMOTE_LOCATION
+    remote_dir = args.remote or REMOTE_LOCATION
 
     # Connect SSH
     client = paramiko.SSHClient()
@@ -138,8 +147,16 @@ def main():
         password = getpass.getpass(f"Password for {args.user}@{args.host}: ")
 
     try:
-        client.connect(args.host, port=args.port, username=args.user,
-                       password=password, pkey=pkey, timeout=10, allow_agent=True, look_for_keys=True)
+        client.connect(
+            args.host,
+            port=args.port,
+            username=args.user,
+            password=password,
+            pkey=pkey,
+            timeout=10,
+            allow_agent=True,
+            look_for_keys=True
+        )
     except (paramiko.ssh_exception.AuthenticationException, socket.error) as e:
         print(f"SSH connection failed: {e}", file=sys.stderr)
         return 2

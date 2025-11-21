@@ -26,14 +26,6 @@ PASSWORD = "imang"     # remote password
 
 REMOTE_TEMP_DIR = f"/home/{USERNAME}/.temp"
 
-# Header Example:
-# [Aria Header Start]
-# Include:
-# - RaspberryPi/Input.py
-# Libraries:
-# - opencv-python
-# [Aria Header End]
-
 
 def ensure_remote_dir(sftp, path):
     # create directories recursively on the remote side (posix path)

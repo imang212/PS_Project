@@ -11,7 +11,8 @@ class ServoController:
         print(f"Initialized ServoController on GPIO pin {self.gpio_pin}.")
 
     def set_position(self, frequency, position):
-        lgpio.tx_servo(self.handle, self._position_to_duty_cycle(position))
+        lgpio.tx_pwm(self.chip, self.gpio_pin, frequency, self._position_to_duty_cycle(position))
+        self.position = position
         print(f"Set servo to position {position}° with frequency {frequency}Hz.")
 
     def _position_to_duty_cycle(self, position):
