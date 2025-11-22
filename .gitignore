@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+fastapi_control_server/__pycache__
+Input/__pycache__
+AI/yolo_files/yolov3.weights
+
