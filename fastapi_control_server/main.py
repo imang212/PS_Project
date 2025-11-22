@@ -1,13 +1,12 @@
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field
 from typing import Optional, List, Tuple
 from pathlib import Path
 from datetime import datetime
-import lgpio
-import asyncio
 from time import sleep
 import subprocess
+from ServoControl import ContinuousServo
 
 app = FastAPI()
 
@@ -18,45 +17,106 @@ CAPTURE_DIR.mkdir(exist_ok=True)
 ## MODELS
 # Servo control request
 class ServoRequest(BaseModel):
-    angle: int = Field(..., ge=0, le=180, description="Servo position (0 to 180 degrees)")
+    angle: int = Field(..., ge=-180, le=180, description="Servo position (-180 to 180 degrees)")
+    speed: int = Field(50, ge=0, le=100, description="Speed percentage (0 to 100%)")
 
 # Camera settings for capture
 class CameraSettings(BaseModel):
     width: int = Field(1536, ge=1536, le=4608)
     height: int = Field(864, ge=864, le=2592)
     
-# AI Analysis Result Models
-class DetectionData(BaseModel):
-    label: str
-    confidence: float
-    bbox: List[int]  # [x, y, width, height]
-class AIAnalysisResult(BaseModel):
-    timestamp: str
-    device_id: str
-    analysis_type: str  # "object_detection", "face_detection", "motion_detection"
-    detections: List[DetectionData]
-    frame_number: Optional[int] = None
-    metadata: Optional[dict] = None
 
-## In-memory storage for analysis results (for demo purposes)
-analysis_history = []
+# INITIALIZE SERVO
+@app.on_event("startup")
+async def startup():
+    global servo_L
+    servo_L = ContinuousServo(chip=0, pin=18)
+    print("Servo API ready")
 
-## SERVO CONTROL
-HANDLE = lgpio.gpiochip_open(0) # Open GPIO chip 0
-lgpio.gpio_claim_output(HANDLE, 18)  # GPIO18 for servo PWM
+@app.on_event("shutdown")
+async def shutdown():
+    if servo_L:
+        servo_L.cleanup()
+    print("Servo cleaned up")
 
 # SERVO MOVE
 @app.post("/servo/move")
 async def move_servo(data: ServoRequest):
-    """Move servo to normalized position (0 to 180 degrees)"""
+    """Move servo from -180 to 180 degrees)"""
+    if not (-180 <= data.angle <= 180):
+        raise HTTPException(400, "Angle must be between -180–180°")
     try:
 	    # set angle
-        duty = 5 + (data.angle / 180) * 5
-        lgpio.tx_pwm(HANDLE, 0, 50, duty)
-        await asyncio.sleep(0.4)
-        return {"status": "ok", "angle_set": data.angle}
+        pulse = await servo_L.rotate_degrees(data.angle,data.speed)
+        return {"status": "ok", "angle_set": data.angle, "speed_value": pulse}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Servo error: {str(e)}")
+
+# WEBSOCKET ENDPOINT FOR REAL-TIME STREAMING
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time detection streaming.
+    Protocol:
+    1. Client connects to ws://server:8000/ws
+    2. Server accepts connection
+    3. Server continuously sends detection data as JSON
+    4. Client receives updates in real-time
+    Message format:
+    {
+        "type": "detections",
+        "timestamp": "2024-11-20T10:30:00.123456",
+        "frame_id": 123,
+        "detections": [
+            {
+                "bbox": [100, 100, 200, 200],
+                "label": "car",
+                "confidence": 0.95,
+                "track_id": 1
+            }
+        ],
+        "statistics": {
+            "total_count": 5,
+            "counts_by_type": {"car": 3, "truck": 2},
+            "fps": 15.2
+        }
+    }    
+    Usage (JavaScript):
+    ```javascript
+    const ws = new WebSocket('ws://localhost:8000/ws');
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log('Detections:', data.detections);
+        console.log('Statistics:', data.statistics);
+    };
+    ```
+    Args:
+        websocket: FastAPI WebSocket connection
+    """
+    if pipeline is None:
+        await websocket.close(code=1011, reason="Pipeline not initialized")
+        return
+    # Accept and register connection
+    await pipeline.ws_manager.connect(websocket)
+    try:
+        # Keep connection alive and handle incoming messages
+        while True:
+            # Wait for messages from client (e.g., commands, config changes)
+            data = await websocket.receive_text()
+            # Echo back or process commands
+            # For now, just acknowledge
+            await websocket.send_json({
+                "type": "ack",
+                "message": "Message received",
+                "data": data
+            })
+    except WebSocketDisconnect:
+        # Client disconnected
+        pipeline.ws_manager.disconnect(websocket)
+    except Exception as e:
+        print(f"[WebSocket] Error: {e}")
+        pipeline.ws_manager.disconnect(websocket)
+
 
 # CAMERA CAPTURE (PHOTO)
 @app.post("/camera/stream/capture")
