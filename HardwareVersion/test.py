@@ -33,7 +33,7 @@ pipeline = (
 )
 
 pipeline.add_node(IntermediatePrint("After Input"))
-pipeline.add_node(HailoYoloNode("HardwareVersion/dummy_model.hef"))
+pipeline.add_node(HailoYoloNode())
 pipeline.add_node(IntermediatePrint("After HailoYolo"))
 pipeline.add_node(IntermediatePrint("Final Output"))
 

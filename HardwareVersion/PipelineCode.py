@@ -10,7 +10,6 @@ from collections import deque
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
-from hailo_platform_sdk.python_api import Network, Device, Tensor
 import numpy as np
 import picamera2
 import random
@@ -282,107 +281,19 @@ class GStreamerInputNode(Node):
         })
 
 class HailoYoloNode(Node):
-    def __init__(self, hef_path: str, input_shape=(640, 640, 3), conf_threshold=0.25):
-        super().__init__()
-        self.hef_path = hef_path
-        self.input_shape = input_shape
-        self.conf_threshold = conf_threshold
+    """
+    Node that performs Hailo-Yolo inference on the latest hardware-backed buffer.
+    Requires a Hailo device and a loaded Hailo-Yolo network.
+    """
 
-        # Initialize Hailo device and network
-        self.device = Device()
-        self.network = Network(hef_path, self.device)
-        self.input_tensor = self.network.inputs[0]
-        self.output_tensor = self.network.outputs[0]
+    def __init__(self):
+        super().__init__()
+        # TODO: Initialize Hailo device, load model, prepare inference engine
 
     def _process(self, pipeline_data: PipelineData):
-        # Ensure detections list exists
-        if pipeline_data.detections is None:
-            pipeline_data.detections = []
-
-        # Pick the latest hardware buffer
-        gst_buffer = pipeline_data.latest_buffer or (pipeline_data.history[-1] if pipeline_data.history else None)
-        if gst_buffer is None:
-            return
-
-        # Hailo SDK can accept buffer handles directly if using zero-copy
-        # Here we assume _prepare_input_from_gstbuffer returns a memory handle or DMA buffer
-        # Prepare input
-        input_handle = self._prepare_input_from_gstbuffer(gst_buffer)
-        if input_handle is None:
-            return
-
-        self.input_tensor[:] = input_handle  # feed Hailo without CPU copy
-        self.network.run()
-        self._unmap_last_buffer()  # release buffer mapping
-
-        # Run inference
-        self.network.run()
-
-        # Read output tensor and decode
-        output_data = self.output_tensor[:]
-        decoded_detections = self._decode_yolo_output(output_data)
-
-        # Filter and append
-        filtered = [det for det in decoded_detections if det["conf"] >= self.conf_threshold]
-        pipeline_data.detections.extend(filtered)
-
-        # Update diagnostics
-        pipeline_data.meta.setdefault("hailo_info", {})
-        pipeline_data.meta["hailo_info"].update({
-            "hef_path": self.hef_path,
-            "num_detections": len(filtered)
-        })
-
-    def _prepare_input_from_gstbuffer(self, gst_buffer):
-        """
-        Convert GstBuffer to Hailo-compatible input without CPU copies.
-        Returns a memoryview or ctypes pointer to the buffer.
-        """
-
-        # Step 1: Map the GstBuffer for reading
-        success, info = gst_buffer.map(Gst.MapFlags.READ)
-        if not success:
-            print("[HailoYoloNode] Failed to map GstBuffer")
-            return None
-
-        # Step 2: Wrap mapped memory in a memoryview (no copy)
-        hw_memory = memoryview(info.data)
-
-        # Step 3: Reshape / transpose if needed for Hailo input
-        # Assume gst_buffer is RGB8 with shape H x W x C
-        h, w, c = self.input_shape
-        # memoryview is 1D, convert to NCHW via numpy view without copy
-        arr = np.frombuffer(hw_memory, dtype=np.uint8)
-        try:
-            arr = arr.reshape((h, w, c))
-        except ValueError:
-            print("[HailoYoloNode] Buffer size mismatch with input_shape")
-            gst_buffer.unmap(info)
-            return None
-
-        # Hailo expects NCHW
-        arr = np.transpose(arr, (2, 0, 1))  # C x H x W
-        arr = np.expand_dims(arr, axis=0)   # batch dimension: 1 x C x H x W
-
-        # Step 4: Keep gst_buffer mapped until after inference
-        # We'll store info in self to unmap later
-        self._last_mapped_info = info
-        self._last_mapped_buffer = gst_buffer
-
-        return arr
-
-    def _unmap_last_buffer(self):
-        """
-        Call this after inference to unmap the GstBuffer
-        """
-        if hasattr(self, "_last_mapped_buffer") and hasattr(self, "_last_mapped_info"):
-            self._last_mapped_buffer.unmap(self._last_mapped_info)
-            del self._last_mapped_buffer
-            del self._last_mapped_info
-
-    def _decode_yolo_output(self, output_array):
-        # Implement YOLO decoding here
-        return []
+        pass
+        # TODO: Implement Hailo-Yolo inference here
+        
 
 class Pipeline:
     """
@@ -452,7 +363,6 @@ class Pipeline:
         callback signature:
             callback(pdata: PipelineData)
         """
-        import time
 
         try:
             while True:
