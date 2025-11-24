@@ -1,5 +1,6 @@
 # Include:
 # - HardwareVersion/PipelineCode.py
+# - HardwareVersion/dummy_model.hef
 
 from PipelineCode import Pipeline, Node, PipelineData, GStreamerInputNode, HailoYoloNode
 import time
@@ -30,6 +31,11 @@ pipeline = (
     Pipeline()
     .add_node(GStreamerInputNode(history_size=3))
 )
+
+pipeline.add_node(IntermediatePrint("After Input"))
+pipeline.add_node(HailoYoloNode("HardwareVersion/dummy_model.hef"))
+pipeline.add_node(IntermediatePrint("After HailoYolo"))
+pipeline.add_node(IntermediatePrint("Final Output"))
 
 for i in range(101):
     pdata = pipeline.tick(); time.sleep(0.1)

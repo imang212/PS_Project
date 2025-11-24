@@ -10,9 +10,10 @@ from collections import deque
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
+from hailo_platform_sdk.python_api import Network, Device, Tensor
 import numpy as np
-import logging
 import picamera2
+import random
 
 log = logging.getLogger(__name__)
 
@@ -281,80 +282,107 @@ class GStreamerInputNode(Node):
         })
 
 class HailoYoloNode(Node):
-    """
-    Computation node that accepts hardware-backed frames (via pipeline_data.latest_buffer
-    or pipeline_data.history) and runs YOLO inference on the Hailo accelerator.
-
-    The Hailo SDK integration points are placeholders; replace them with your actual Hailo calls.
-    """
-
-    def __init__(self, model_path: str, input_shape=(640, 640, 3), conf_threshold=0.25):
+    def __init__(self, hef_path: str, input_shape=(640, 640, 3), conf_threshold=0.25):
         super().__init__()
-        self.model_path = model_path
+        self.hef_path = hef_path
         self.input_shape = input_shape
         self.conf_threshold = conf_threshold
-        # Placeholder for the actual Hailo runtime / context object
-        self.hailo_runtime = self._load_model(model_path)
 
-    def _load_model(self, model_path):
-        """
-        Load compiled HEF model and prepare runtime.
-        Replace with actual Hailo SDK code:
-          - create device/context
-          - load HEF
-          - allocate tensors/buffers
-        """
-        log.info("Loading Hailo model (placeholder): %s", model_path)
-        return None  # replace with real runtime
+        # Initialize Hailo device and network
+        self.device = Device()
+        self.network = Network(hef_path, self.device)
+        self.input_tensor = self.network.inputs[0]
+        self.output_tensor = self.network.outputs[0]
+
+    def _process(self, pipeline_data: PipelineData):
+        # Ensure detections list exists
+        if pipeline_data.detections is None:
+            pipeline_data.detections = []
+
+        # Pick the latest hardware buffer
+        gst_buffer = pipeline_data.latest_buffer or (pipeline_data.history[-1] if pipeline_data.history else None)
+        if gst_buffer is None:
+            return
+
+        # Hailo SDK can accept buffer handles directly if using zero-copy
+        # Here we assume _prepare_input_from_gstbuffer returns a memory handle or DMA buffer
+        # Prepare input
+        input_handle = self._prepare_input_from_gstbuffer(gst_buffer)
+        if input_handle is None:
+            return
+
+        self.input_tensor[:] = input_handle  # feed Hailo without CPU copy
+        self.network.run()
+        self._unmap_last_buffer()  # release buffer mapping
+
+        # Run inference
+        self.network.run()
+
+        # Read output tensor and decode
+        output_data = self.output_tensor[:]
+        decoded_detections = self._decode_yolo_output(output_data)
+
+        # Filter and append
+        filtered = [det for det in decoded_detections if det["conf"] >= self.conf_threshold]
+        pipeline_data.detections.extend(filtered)
+
+        # Update diagnostics
+        pipeline_data.meta.setdefault("hailo_info", {})
+        pipeline_data.meta["hailo_info"].update({
+            "hef_path": self.hef_path,
+            "num_detections": len(filtered)
+        })
 
     def _prepare_input_from_gstbuffer(self, gst_buffer):
         """
-        Convert or wrap the GstBuffer for the Hailo SDK input.
-        The goal: avoid copying where possible and pass a handle or DMA-backed region directly.
-        Implementation will depend on the Hailo SDK API.
+        Convert GstBuffer to Hailo-compatible input without CPU copies.
+        Returns a memoryview or ctypes pointer to the buffer.
         """
-        # Placeholder: return the buffer as-is (your SDK may require mapping to a special structure)
-        return gst_buffer
 
-    def _run_inference_on_hailo(self, prepared_input):
+        # Step 1: Map the GstBuffer for reading
+        success, info = gst_buffer.map(Gst.MapFlags.READ)
+        if not success:
+            print("[HailoYoloNode] Failed to map GstBuffer")
+            return None
+
+        # Step 2: Wrap mapped memory in a memoryview (no copy)
+        hw_memory = memoryview(info.data)
+
+        # Step 3: Reshape / transpose if needed for Hailo input
+        # Assume gst_buffer is RGB8 with shape H x W x C
+        h, w, c = self.input_shape
+        # memoryview is 1D, convert to NCHW via numpy view without copy
+        arr = np.frombuffer(hw_memory, dtype=np.uint8)
+        try:
+            arr = arr.reshape((h, w, c))
+        except ValueError:
+            print("[HailoYoloNode] Buffer size mismatch with input_shape")
+            gst_buffer.unmap(info)
+            return None
+
+        # Hailo expects NCHW
+        arr = np.transpose(arr, (2, 0, 1))  # C x H x W
+        arr = np.expand_dims(arr, axis=0)   # batch dimension: 1 x C x H x W
+
+        # Step 4: Keep gst_buffer mapped until after inference
+        # We'll store info in self to unmap later
+        self._last_mapped_info = info
+        self._last_mapped_buffer = gst_buffer
+
+        return arr
+
+    def _unmap_last_buffer(self):
         """
-        Execute the model on the Hailo chip and return parsed results.
-        Replace this with real runtime.run(...) calls and parsing.
+        Call this after inference to unmap the GstBuffer
         """
-        # Placeholder returns empty detections:
+        if hasattr(self, "_last_mapped_buffer") and hasattr(self, "_last_mapped_info"):
+            self._last_mapped_buffer.unmap(self._last_mapped_info)
+            del self._last_mapped_buffer
+            del self._last_mapped_info
+
+    def _decode_yolo_output(self, output_array):
+        # Implement YOLO decoding here
         return []
-
-    def _process(self, pipeline_data: PipelineData):
-        """
-        Use the most appropriate source:
-          - Prefer the latest hardware buffer (pipeline_data.latest_buffer)
-          - If None and history exists, optionally use history[-1]
-        Populate pipeline_data.detections with a list of dicts.
-        """
-        gst_buffer = pipeline_data.latest_buffer
-        if gst_buffer is None and pipeline_data.history:
-            gst_buffer = pipeline_data.history[-1]
-
-        if gst_buffer is None:
-            pipeline_data.detections = []
-            return
-
-        # Wrap or convert buffer for Hailo input (avoid copies if possible)
-        hailo_input = self._prepare_input_from_gstbuffer(gst_buffer)
-
-        # Run inference (placeholder)
-        detections = self._run_inference_on_hailo(hailo_input)
-
-        # Post-process (filter by conf_threshold, convert coordinates if needed)
-        # Expected format: [{'bbox': (x1,y1,x2,y2), 'class': id, 'conf': float}, ...]
-        pipeline_data.detections = [d for d in detections if d.get("conf", 0) >= self.conf_threshold]
-
-        # Optionally add diagnostics
-        pipeline_data.meta.setdefault("computation_info", {})
-        pipeline_data.meta["computation_info"].update({
-            "model": self.model_path,
-            "num_detections": len(pipeline_data.detections)
-        })
 
 class Pipeline:
     """
@@ -438,3 +466,4 @@ class Pipeline:
                     time.sleep(interval)
         except KeyboardInterrupt:
             print("Pipeline stopped.")
+

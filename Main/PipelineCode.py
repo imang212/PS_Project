@@ -1,3 +1,117 @@
+"""
+PipelineCode.py
+Header:
+    High-level, extensible pipeline framework for camera input and inference on
+    Hailo accelerators. Provides a dual-branch GStreamer input node (zero-copy
+    hardware path + CPU copy path for visualization), an example inference node
+    (HailoYoloNode) and a simple Pipeline controller to chain nodes together.
+Overview:
+    This module defines a small data-flow pipeline pattern where a central
+    mutable object (PipelineData) flows through a chain of Node instances. Each
+    Node updates PipelineData in-place and then forwards it to the next node.
+    The design focuses on avoiding unnecessary CPU copies by maintaining
+    hardware-backed buffer references while still providing an optional
+    CPU-visible frame for visualization or other CPU-only processing.
+Primary classes and responsibilities:
+    - PipelineData
+        Central data carrier for a single pipeline iteration.
+        Fields include:
+          * request_frame_copy: bool - indicates caller requests a CPU copy this iteration
+          * latest_buffer: optional hardware-backed buffer (e.g., GstBuffer)
+          * history: list of recent hardware-backed buffer references
+          * frame_copy: optional numpy array (CPU copy of frame)
+          * timestamp: float - time of node completion
+          * detections: optional list of detection dicts produced by compute nodes
+          * meta: dict - place for diagnostics and per-node information
+    - Node (abstract)
+        Base class for pipeline nodes. Subclasses implement _process(pipeline_data)
+        and use the public process(pipeline_data) to ensure the node's work runs
+        and that the pipeline chaining contract (always pass to next node) is honored.
+        Attributes:
+          * next_node: optional Node - next node in the chain
+    - GStreamerInputNode (Node)
+        Builds and runs a GStreamer pipeline that tees the camera stream onto two
+        branches:
+          1) hailo_sink: intended to provide zero-copy, hardware-backed buffers
+             (kept in a small in-process history for downstream inference).
+          2) python_sink: CPU branch where frames are copied to user-space and can
+             be converted to numpy arrays for visualization/CPU processing.
+        Key behavior:
+          * build_element(): constructs and starts the Gst pipeline; configures appsinks
+          * _process(pipeline_data): pulls from both appsinks (non-blocking with a timeout),
+            updates pipeline_data.latest_buffer, pipeline_data.history, optionally
+            fills pipeline_data.frame_copy (if request_frame_copy is True), and
+            records diagnostics in pipeline_data.meta.
+        Notes:
+          * _gstbuffer_to_numpy() contains a simple conversion assuming raw RGB or GRAY8,
+            real deployments may need format-specific conversion (NV12/YUV etc.).
+          * The class attempts to probe supported camera modes (via picamera2) and falls
+            back to safe defaults when introspection is not available.
+    - HailoYoloNode (Node)
+        Illustrative computation node that demonstrates where Hailo SDK integration
+        would occur. Intended to consume a hardware-backed buffer reference and run
+        inference without copying to CPU when possible.
+        Key hooks:
+          * _load_model(model_path): placeholder to create device/context and load HEF
+          * _prepare_input_from_gstbuffer(gst_buffer): placeholder to wrap or map the
+            GstBuffer into a form the Hailo runtime accepts
+          * _run_inference_on_hailo(prepared_input): placeholder for runtime invocation
+        Expected output:
+          * pipeline_data.detections: list of detection dicts with keys 'bbox', 'class', 'conf'
+        Notes:
+          * The current implementation returns empty detections and must be replaced
+            with concrete Hailo SDK calls and result parsing.
+    - Pipeline
+        Controller for connecting nodes and executing the chain.
+        Key methods:
+          * add_node(node): append a node to the end of the chain (returns self)
+          * tick(request_frame_copy=True): run one pipeline iteration, returns PipelineData
+          * run(callback=None, interval=0.0): convenience loop to continuously call tick and
+            optionally pass each PipelineData to a callback (e.g., for rendering/logging)
+Usage (conceptual):
+    1) Instantiate Pipeline().
+    2) Create and configure a GStreamerInputNode(width, height, ...) and call build_element().
+    3) Add a HailoYoloNode(model_path, ...) (or other nodes) to the pipeline via add_node().
+    4) Call pipeline.tick(request_frame_copy=True/False) to process a single frame or pipeline.run()
+       to loop continuously. The returned PipelineData contains buffers, optional CPU frame,
+       detections and metadata.
+Best practices and notes:
+    - Avoid requesting a CPU copy unless needed: set request_frame_copy=False for pure
+      accelerator pipelines to minimize CPU overhead.
+    - The history mechanism stores references to GstBuffer objects to allow inference to
+      fall back to recent frames if no new hardware buffer is available on a tick.
+    - The Gst pipeline string and memory hints (e.g., memory:NVMM) may need to be adjusted
+      depending on the platform (Raspberry Pi, Jetson, etc.) and the actual camera source
+      element (libcamerasrc vs v4l2src).
+    - Replace placeholder Hailo methods with concrete SDK calls, taking care to map or
+      share DMA buffers when possible to keep the zero-copy data path.
+Requirements and environment:
+    - Python bindings for GStreamer (PyGObject / gi.repository.Gst)
+    - numpy
+    - picamera2 (optional — used for probing camera modes; code falls back on defaults)
+    - Hailo SDK (or other accelerator SDK) to implement the placeholders in HailoYoloNode
+Extensibility:
+    - Add additional Node subclasses to perform post-processing, drawing, logging,
+      or to integrate other compute backends (TensorRT, OpenVINO, CPU).
+    - Node._process should be kept side-effect-limited to modifying the supplied
+      PipelineData and should not swallow exceptions silently; consider adding explicit
+      error handling/logging per node.
+Limitations:
+    - The provided Hailo integration is a placeholder; real applications must implement
+      device lifecycle, error handling, and efficient zero-copy buffer mapping specific
+      to the target hardware/SDK.
+    - Gst buffer to numpy conversion implemented here assumes planar contiguous layout
+      appropriate for RGB/GRAY raw formats; conversion for other formats is non-trivial.
+Example (pseudo):
+    pipeline = Pipeline()
+    input_node = GStreamerInputNode(width=640, height=640)
+    input_node.build_element()
+    pipeline.add_node(input_node)
+    pipeline.add_node(HailoYoloNode("/path/to/model.hef"))
+    pdata = pipeline.tick(request_frame_copy=True)
+    # use pdata.frame_copy for visualization, pdata.detections for results
+"""
+
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 import subprocess
