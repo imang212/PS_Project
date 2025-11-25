@@ -39,26 +39,6 @@ flowchart TD
     style RPI fill:#f9f9f9,stroke:#888,stroke-width:1px,corner-radius:8px
     style USER fill:#eef6ff,stroke:#55a,stroke-width:1px,corner-radius:8px
 ```
-### Možnost stavby komponent
-```mermaid
-graph TD
-    subgraph Notebook_PC["Notebook / PC"]
-        A1[FastAPI Web Server] --> A2[AI / ML Analyzátor videa]
-        A1 --> A3[Frontend Dashboard]
-        A2 -->|Pošle příkaz| A4["API klient (HTTP Request)"]
-    end
-
-    subgraph RaspberryPi["Raspberry Pi"]
-        B1[Mini FastAPI API Server]
-        B2["Servo Controller (GPIO / PCA9685)"]
-        B3["Kamera (IMX708 / CSI)"]
-        B1 --> B2
-        B1 --> B3
-    end
-
-    A4 -->|HTTP POST/GET| B1
-    B3 -->|RTSP / Snapshot| A2
-```
 ### Datový tok
 1. **Kamera** snímá objekt v reálném čase.  
 2. **AI model (TensorFlow Lite)** provede detekci a klasifikaci.  

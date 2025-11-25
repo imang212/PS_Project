@@ -4,7 +4,6 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHON_VERSION=3.11
 ENV PATH="/venv/bin:$PATH"
-
 # Instalace základních závislostí
 RUN apt-get update && apt-get install -y \
     python3.11 \ 
@@ -29,37 +28,55 @@ RUN apt-get update && apt-get install -y \
     libx264-dev \
     libhdf5-dev \ 
     libhdf5-serial-dev \
+    hailo-all \
+    python3.11-onnx \
     && rm -rf /var/lib/apt/lists/*
+# Vytvoření pracovního adresáře
+WORKDIR /app
+# Kopírování requirements.txt do containeru
+COPY requirements.txt /app/requirements.txt
 # Vytvoření virtuálního prostředí
-RUN python3.11 -m venv /venv
+RUN python3.11 -m venv /app/venv
 # Aktivace virtuálního prostředí a instalace základních balíčků
-RUN . /venv/bin/activate && \
+RUN . /app/venv/bin/activate && \
     pip install --upgrade pip setuptools wheel
 # Instalace PyTorch pro ARM64 (Raspberry Pi)
 # Pro RPi je potřeba použít speciální verzi nebo build z source
-RUN . /venv/bin/activate && \
+RUN . /app/venv/bin/activate && \
     pip install numpy Pillow && \
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-# Instalace Ultralytics (YOLO11) a dalších potřebných knihoven
-RUN /venv/bin/pip install --no-cache-dir ultralytics fastapi "uvicorn[standard]" websockets opencv-python numpy scipy filterpy pydantic
-
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Instalace dalších požadovaných balíčků z requirements.txt
+RUN . /app/venv/bin/activate && \
+pip install --no-cache-dir -r requirements.txt
+# Kopírování všech Python souborů z aktuálního adresáře
+COPY . /app/
 # Vytvoření testovacího skriptu
 RUN echo '#!/bin/bash\n\
-source /venv/bin/activate\n\
+source /app/venv/bin/activate\n\
 echo "Python verze:"\n\
-python --version\
+python --version\n\
 echo "PyTorch verze:"\n\
 python -c "import torch; print(f\"PyTorch: {torch.__version__}\")"\n\
 echo "Ultralytics verze:"\n\
 python -c "import ultralytics; print(f\"Ultralytics: {ultralytics.__version__}\")"\n\
 echo "Test YOLO11:"\n\
 python -c "from ultralytics import YOLO; print(\"YOLO import úspěšný!\")"\n\
-' > /test_install.sh && chmod +x /test_install.sh
+python -c "import fastapi; print(f\"FastAPI: {fastapi.__version__}\")"\n\
+python -c "import uvicorn; print(f\"Uvicorn: {uvicorn.__version__}\")"\n\
+python -c "import websockets; print(f\"Websockets: {websockets.__version__}\")"\n\
+python -c "import cv2; print(f\"OpenCV: {cv2.__version__}\")"\n\
+python -c "import numpy; print(f\"NumPy: {numpy.__version__}\")"\n\
+python -c "import scipy; print(f\"SciPy: {scipy.__version__}\")"\n\
+python -c "import filterpy; print(\"FilterPy: OK\")"\n\
+python -c "import pydantic; print(f\"Pydantic: {pydantic.__version__}\")"\n\
+python -c "from trackers import SORTTracker; print(\"Roboflow Trackers: OK\")" 2>/dev/null || echo "⚠ Roboflow Trackers: Není nainstalováno"\n\
+python -c "import supervision; print(f\"Supervision: {supervision.__version__}\")"\n\
+' > /app/test_install.sh && chmod +x /app/test_install.sh
 # Vytvoření skriptu pro spuštění bashu s aktivovaným venv
 RUN echo '#!/bin/bash\n\
-source /venv/bin/activate\n\
+source /app/venv/bin/activate\n\
 exec bash "$@"\n\
-' > /entrypoint.sh && chmod +x /entrypoint.sh
+' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 # Nastavení entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/test_install.sh"]
