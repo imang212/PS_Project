@@ -91,7 +91,7 @@ class GStreamerInputNode(Node):
       - optionally places a CPU-copy (OpenCV numpy array) into pipeline_data.frame_copy
     """
 
-    def __init__(self, width=640, height=640, history_size=5, filter_type="RGB", timeout_ns=Gst.SECOND // 10):
+    def __init__(self, width=1920, height=1080, history_size=5, filter_type="RGB", timeout_ns=Gst.SECOND // 10):
         super().__init__()
         self.width = width
         self.height = height
@@ -111,6 +111,9 @@ class GStreamerInputNode(Node):
         if not self._is_supported(self.width, self.height, self.filter_type):
             raise ValueError(f"Requested {self.width}x{self.height} / {self.filter_type} not supported. "
                              f"Supported: {self.supported_modes}")
+        
+        # Start the GStreamer camera pipeline
+        self.build_element()
 
         # Keep a reference to the launched Gst.Pipeline if needed
         self._pipeline = None
@@ -286,14 +289,45 @@ class HailoYoloNode(Node):
     Requires a Hailo device and a loaded Hailo-Yolo network.
     """
 
-    def __init__(self):
+    def __init__(self, model_path: str):
         super().__init__()
-        # TODO: Initialize Hailo device, load model, prepare inference engine
+        import hailo_sdk  # adjust import to your Hailo SDK
+
+        # Load Hailo device and network
+        self.device: hailo_sdk.Device = hailo_sdk.Device()  # pseudo-code
+        self.network = self.device.load_network(model_path)
 
     def _process(self, pipeline_data: PipelineData):
-        pass
-        # TODO: Implement Hailo-Yolo inference here
-        
+        if pipeline_data.latest_buffer is None:
+            # No new frame to process
+            pipeline_data.detections = []
+            return
+
+        gst_buffer = pipeline_data.latest_buffer
+
+        # Convert GstBuffer to something Hailo can use (usually numpy or raw pointer)
+        # We'll assume the network can take a numpy array
+        # WARNING: Actual Hailo API may differ; adjust accordingly
+        size = gst_buffer.get_size()
+        raw = gst_buffer.extract_dup(0, size)
+        # Assume RGB888 output from GStreamer
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape((pipeline_data.meta['input_info']['height'],
+                                                            pipeline_data.meta['input_info']['width'], 3))
+
+        # Run inference
+        results = self.network.run_inference(frame)  # pseudo-code
+
+        # Convert results into a list of dicts: {'bbox':(...), 'class':id, 'conf':float}
+        # This depends on your Hailo YOLO SDK output format
+        detections = []
+        for det in results:
+            detections.append({
+                'bbox': det['bbox'],
+                'class': det['class_id'],
+                'conf': det['confidence']
+            })
+
+        pipeline_data.detections = detections
 
 class Pipeline:
     """
