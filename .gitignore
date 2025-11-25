@@ -3,4 +3,6 @@ __pycache__/
 fastapi_control_server/__pycache__
 Input/__pycache__
 AI/yolo_files/yolov3.weights
+AI_traffic_detection_system/__pycache__
+AI_traffic_detection_system/rpi-venv/
 
