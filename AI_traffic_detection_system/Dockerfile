@@ -28,23 +28,24 @@ RUN apt-get update && apt-get install -y \
     libx264-dev \
     libhdf5-dev \ 
     libhdf5-serial-dev \
-    hailo-all \
-    python3.11-onnx \
+    libcap-dev \
+    libarchive-dev \
+    libavdevice-dev \ 
+    libavutil-dev \
+    libswresample-dev \
+    # hailo-all \
+    # python3-picamera2 \
+    # libcamera-apps \
     && rm -rf /var/lib/apt/lists/*
 # Vytvoření pracovního adresáře
 WORKDIR /app
 # Kopírování requirements.txt do containeru
 COPY requirements.txt /app/requirements.txt
 # Vytvoření virtuálního prostředí
-RUN python3.11 -m venv /app/venv
+RUN python3.11 -m venv /app/venv --system-site-packages
 # Aktivace virtuálního prostředí a instalace základních balíčků
 RUN . /app/venv/bin/activate && \
     pip install --upgrade pip setuptools wheel
-# Instalace PyTorch pro ARM64 (Raspberry Pi)
-# Pro RPi je potřeba použít speciální verzi nebo build z source
-RUN . /app/venv/bin/activate && \
-    pip install numpy Pillow && \
-    pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Instalace dalších požadovaných balíčků z requirements.txt
 RUN . /app/venv/bin/activate && \
 pip install --no-cache-dir -r requirements.txt
@@ -80,3 +81,5 @@ exec bash "$@"\n\
 # Nastavení entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/test_install.sh"]
+# Výchozí příkaz pro spuštění testu scriptu yoloTrafficDetectionSystem.py
+CMD ["python", "yoloTrafficDetectionSystem.py"]

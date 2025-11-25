@@ -600,4 +600,83 @@ class TrafficMonitoringPipeline:
         
         return annotated
 
+# PART 8: LOCAL TEST WITHOUT FASTAPI SERVER ON DEVICE
+if __name__ == "__main__":
+    """
+    Local camera test without FastAPI server.
+    Press 'q' to exit.
+    """
+    print("=== YOLO11 Traffic Detection Test ===")
+    print("Press 'q' to exit")
+    print()
+    # Configuration for local testing (adjust resolution for your camera)
+    RESOLUTION = (640, 480)  # Modify based on your camera capabilities
+    FPS = 15
+    MODEL_PATH = "yolo11n.pt"  # Ensure model is downloaded
+    # Create pipeline instance
+    pipeline = TrafficMonitoringPipeline(model_path=MODEL_PATH, video_source=0, resolution=RESOLUTION, fps=FPS)
+    # Start video streamer thread
+    pipeline.streamer.start()
+    print("Waiting for camera initialization...")
+    time.sleep(2)
+    print("Starting detection...")
+    print()    
+    try:
+        while True:
+            # Get frame from camera
+            frame = pipeline.streamer.read()
+            if frame is None:
+                print("Waiting for frame...")
+                time.sleep(0.1)
+                continue  
+            # Run YOLO11 detection
+            detections = pipeline.detector.detect(frame)
+            # Update object tracker
+            tracked_detections = pipeline.counter.update(detections)
+            pipeline.current_detections = tracked_detections
+            pipeline.current_frame = frame
+            # Update frame counter and FPS metrics
+            pipeline.frame_id += 1
+            current_time = time.time()
+            if current_time - pipeline.last_fps_update > 1.0:
+                if pipeline.frame_times:
+                    avg_time = sum(pipeline.frame_times) / len(pipeline.frame_times)
+                    pipeline.fps_actual = 1.0 / avg_time if avg_time > 0 else 0
+                    pipeline.frame_times = []
+                pipeline.last_fps_update = current_time
+            # Get annotated frame with drawings
+            annotated = pipeline.get_annotated_frame()
+            if annotated is not None:
+                # Display frame in OpenCV window
+                cv2.imshow('YOLO11 Traffic Detection', annotated)
+                # Print statistics to console every 30 frames
+                if pipeline.frame_id % 30 == 0:
+                    counts = pipeline.counter.get_counts()
+                    print(f"Frame {pipeline.frame_id} | FPS: {pipeline.fps_actual:.1f} | "
+                          f"Total: {pipeline.counter.get_total_count()} | {counts}")
+            # Measure frame processing time
+            frame_start = time.time()
+            # Check for exit key 'q'
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("\nShutting down...")
+                break
+            # Track frame processing time for FPS calculation
+            frame_time = time.time() - frame_start
+            pipeline.frame_times.append(frame_time)
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+    except Exception as e:
+        print(f"\nError occurred: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Clean up resources
+        pipeline.streamer.stop()
+        cv2.destroyAllWindows()
+        print("\nDone!")
+        # Print final statistics
+        print("\n=== FINAL STATISTICS ===")
+        print(f"Total objects detected: {pipeline.counter.get_total_count()}")
+        print(f"Count by type: {pipeline.counter.get_counts()}")
+        print(f"Total frames processed: {pipeline.frame_id}")
 

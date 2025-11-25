@@ -11,7 +11,7 @@ from time import sleep
 from contextlib import asynccontextmanager
 import subprocess
 
-from yolo_traffic_detection import TrafficMonitoringPipeline
+from yoloTrafficDetectionSystem import TrafficMonitoringPipeline
 from ServoControl import ContinuousServo
 
 ## MODELS
