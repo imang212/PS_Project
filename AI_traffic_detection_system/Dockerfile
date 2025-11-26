@@ -33,6 +33,8 @@ RUN apt-get update && apt-get install -y \
     libavdevice-dev \ 
     libavutil-dev \
     libswresample-dev \
+    libfreetype6 \
+    libcamera0 \
     # hailo-all \
     # python3-picamera2 \
     # libcamera-apps \

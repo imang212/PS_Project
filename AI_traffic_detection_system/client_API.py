@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -50,25 +50,28 @@ class HealthResponse(BaseModel):
 # Global pipeline instance for AI process
 pipeline: Optional[TrafficMonitoringPipeline] = None
 
-# FastAPI lifespan context manager for pipeline startup/shutdown
+# INITIALIZE SERVO/S A MONITORING PIPELINE ON STARTUP AND STOP ON SHUTDOWN
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan context manager.
-    Handles startup and shutdown of the traffic monitoring pipeline.
+    Handles startup and shutdown services.
     - Startup: Initialize and start pipeline in background task
     - Shutdown: Stop pipeline and cleanup resources
     """
     global pipeline
+    global servo_L
     # Startup
     print("[FastAPI] Starting up...")
     pipeline = TrafficMonitoringPipeline(model_path="yolo11n.pt", video_source=0, db_path="traffic_data.db", resolution=(1536, 864), fps=15)
+    servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
     # Start pipeline in background
     asyncio.create_task(pipeline.start()) 
     yield
     # Shutdown
     print("[FastAPI] Shutting down...")
     if pipeline: pipeline.stop()
+    if servo_L: servo_L.cleanup()
 
 # Initialize FastAPI app
 app = FastAPI(lifespan=lifespan)
@@ -76,18 +79,6 @@ app = FastAPI(lifespan=lifespan)
 ## CONFIGURATION FOR CAPTURE STORAGE
 CAPTURE_DIR = Path("captures")
 CAPTURE_DIR.mkdir(exist_ok=True)
-
-# INITIALIZE SERVO/S ON STARTUP AND CLEANUP ON SHUTDOWN
-@app.on_event("startup")
-async def startup():
-    global servo_L
-    servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
-    print("Servo API ready")
-@app.on_event("shutdown")
-async def shutdown():
-    if servo_L:
-        servo_L.cleanup()
-    print("Servo cleaned up")
 
 # Allow frontend access
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],)
@@ -276,6 +267,56 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"[WebSocket] Error: {e}")
         pipeline.ws_manager.disconnect(websocket)
+
+# ENDPOINT FOR WEBSOCKET TESTING
+@app.get("/test-ws", response_class=HTMLResponse)
+async def test_websocket_page():
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <title>WebSocket Tester</title>
+        <style>body { font-family: Arial; margin: 20px; } #log { white-space: pre-wrap; background: #eee; padding: 10px; border-radius: 8px; }</style>
+    </head>
+    <body>
+        <h2>WebSocket Test Page</h2>
+        <p>Připojuji se na: <b>wss://192.168.37.205:8000/ws/ai</b></p>
+        <button onclick="sendTest()">Send Test Message</button>
+        <h3>Log:</h3>
+        <div id="log"></div>
+        <script>
+            let logDiv = document.getElementById("log");
+            function log(msg) {
+                logDiv.textContent += msg + "\\n";
+            }
+            // Připojení na WebSocket server
+            let ws = new WebSocket("wss://192.168.37.205:8000/ws/ai");
+            ws.onopen = () => {
+                log("WebSocket připojen!");
+            };
+            ws.onmessage = (event) => {
+                log("Přišla zpráva: " + event.data);
+            };
+            ws.onerror = (error) => {
+                log("Chyba: " + error);
+            };
+            ws.onclose = () => {
+                log("WebSocket byl uzavřen.");
+            };
+            function sendTest() {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ test: "Hello from browser!" }));
+                    log("Odesláno: Hello from browser!");
+                } else {
+                    log("WebSocket není připojen!");
+                }
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
 
 # MJPEG VIDEO AI STREAM ENDPOINT
 @app.get("/stream/ai")

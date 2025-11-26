@@ -17,11 +17,11 @@ Systém bude implementován na **Raspberry Pi** s připojeným **AI akcelerátor
 flowchart TD
     subgraph RPI[Raspberry Pi + AI Accelerator]
         CAM["Kamera (PiCam)"]
-        MODEL["AI model (TensorFlow Lite)"]
+        MODEL["AI model"]
         DECISION["Rozhodovací logika"]
         SERVO["Servo / Motor"]
-        LOGGER["Data Logger"]
-        WEB["Flask Web Server"]
+        LOGGER["websocket"]
+        WEB["FatApi web server"]
     end
 
     CAM --> MODEL
@@ -41,25 +41,25 @@ flowchart TD
 ```
 ### Datový tok
 1. **Kamera** snímá objekt v reálném čase.  
-2. **AI model (TensorFlow Lite)** provede detekci a klasifikaci.  
+2. **AI model** provede detekci a klasifikaci.  
 3. **Rozhodovací logika** vyhodnotí výsledek a vyšle signál servu.  
 4. **Servo motor** fyzicky třídí objekt (např. doprava = dobrý kus, doleva = vadný).  
-5. **Logger** ukládá výsledky (čas, typ objektu, výsledek) do databáze nebo CSV.  
-6. **Flask server** poskytuje webové rozhraní pro zobrazení statistik a živého videa.
+5. **Logger** Posílá výsledky (čas, typ objektu, výsledek) pře WS a ukládá je do db  
+6. **FastApi server** poskytuje webové rozhraní pro zobrazení statistik a živého videa.
 
 ## Rozdělení rolí v týmu
 
 ### 1. AI / Computer Vision Inženýr
 **Zodpovědnosti:**
-- Rešerše metod detekce a klasifikace (YOLOv5, MobileNet, EfficientNet, atd.).
+- Rešerše metod detekce a klasifikace.
 - Sběr a příprava datové sady (fotky objektů, anotace).
-- Trénink a optimalizace modelu pro Raspberry Pi (konverze na TFLite, kvantizace).
+- Trénink a optimalizace modelu pro Raspberry Pi (Hailo).
 - Testování přesnosti modelu.
 
 **Technologie:**
-- Python, TensorFlow / PyTorch  
-- OpenCV, LabelImg  
-- Jupyter Notebook
+- Python  
+- PiCamera2  
+- ONNX + Hailo, yolov8
 
 ---
 
@@ -72,21 +72,21 @@ flowchart TD
 
 **Technologie:**
 - Python (RPi.GPIO / gpiozero)  
-- Raspberry Pi OS  
-- Coral USB Accelerator / Intel Movidius  
+- Raspberry Pi OS
+- rpicam  
 - Bash / Docker (volitelné)
 
 ### 3. Software & Data Visualization Vývojář
 **Zodpovědnosti:**
-- Vývoj webového rozhraní (Flask + Bootstrap / Chart.js).
+- Vývoj webového rozhraní (Bootstrap / Chart.js).
 - Implementace REST API pro přístup k výsledkům klasifikace.
-- Ukládání a vizualizace dat (CSV, SQLite, PostgreSQL).
+- Ukládání a vizualizace dat (WebSocket, SQLite, PostgreSQL).
 - Dokumentace a prezentace výsledků.
 
 **Technologie:**
-- Python, Flask / FastAPI  
+- Python, FastAPI  
 - HTML, CSS, JavaScript (Bootstrap, Chart.js)  
-- SQLite / PostgreSQL  
+- SQLite / PostgreSQL / WebSocket  
 - Git, Markdown, Docker
 
 ## Modulová struktura projektu
@@ -131,9 +131,9 @@ project/
 ## Použité technologie
 | Oblast   | Technologie                               |
 | -------- | ----------------------------------------- |
-| AI / ML  | TensorFlow, TensorFlow Lite, OpenCV       |
-| Embedded | Raspberry Pi, GPIO, Coral USB Accelerator |
-| Backend  | Flask, Python                             |
+| AI / ML  | ONNX, HAILO, YOLOv8m, PiCamera2           |
+| Embedded | Raspberry Pi, GPIO, IMX708 camera         |
+| Backend  | FastApi, Python                           |
 | Frontend | HTML, CSS, Bootstrap, Chart.js            |
 | Databáze | SQLite / PostgreSQL                       |
 | Ostatní  | Git, Docker, Markdown                     |
@@ -143,7 +143,7 @@ project/
 | ----- | ---------------------------------------- |
 | 1–2   | Rešerše, návrh architektury              |
 | 3–5   | Sběr dat, trénink modelu                 |
-| 6–7   | Vývoj softwaru (Flask, API, vizualizace) |
+| 6–7   | Vývoj softwaru (FastApi, vizualizace) ;  |
 | 8–9   | Integrace s Raspberry Pi a hardwarem     |
 | 10    | Testování a ladění                       |
 | 11    | Dokumentace a příprava prezentace        |

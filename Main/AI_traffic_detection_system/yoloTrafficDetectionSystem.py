@@ -343,7 +343,8 @@ class VideoStreamer:
         # Configuration
         config = self.picam2.create_preview_configuration(
             main={"size": resolution, "format": "RGB888"}, # Use RPi hardware-accelerated format
-            controls={"FrameRate": fps}
+            controls={"FrameRate": fps},
+            buffer_count=4  # Increased for stability
         )
         self.picam2.configure(config)
         # FPS control
@@ -353,8 +354,11 @@ class VideoStreamer:
     
     def _capture_loop(self):
         """Internal capture loop running in separate thread"""
+        print("[VideoStreamer] Starting camera hardware...")
         self.picam2.start()
-        time.sleep(2)  # Stabilisation
+        time.sleep(2)  # Stabilizace
+        self.camera_started = True
+        print("[VideoStreamer] Camera ready, beginning frame capture...")
         while self.running:
             start = time.time()
             try:
@@ -383,7 +387,8 @@ class VideoStreamer:
         print("[VideoStreamer] Capture thread started")
     
     def stop(self):
-        """Stop capture thread"""
+        """Stop capture thread gracefully"""
+        print("[VideoStreamer] Stopping...")
         self.running = False
         if self.thread is not None:
             self.thread.join(timeout=5)
@@ -395,9 +400,11 @@ class VideoStreamer:
             return self.frame.copy() if self.frame is not None else None
     
     def is_ready(self):
-        """Check if frames are available"""
         with self.lock:
-            return self.frame is not None
+            has_frame = self.frame is not None
+            ready = has_frame and self.camera_started
+            print(has_frame, ready)
+            return ready
     
 # PART 6: WEBSOCKET MANAGER FOR REAL-TIME STREAMING
 class WebSocketManager:
@@ -484,7 +491,8 @@ class TrafficMonitoringPipeline:
         """
         start_time = time.time()
         # Step 1: Get frame
-        frame = self.streamer.get_frame()
+        #print("[Pipeline] Waiting for frame...")
+        frame = await asyncio.to_thread(self.streamer.get_frame)
         if frame is None:
             await asyncio.sleep(0.01)
             print("[Pipeline] No frame available yet")
@@ -529,6 +537,7 @@ class TrafficMonitoringPipeline:
         }
         # send broadcast message of each frame to all connected clients for real-time updates 
         await self.ws_manager.broadcast(ws_message)
+        
         ## Step 6: Store in database (batch insert)
         #if detection_data_list:
         #    self.db.insert_batch_detections(detection_data_list)
@@ -556,15 +565,17 @@ class TrafficMonitoringPipeline:
         # Wait for first frame to be available
         print("[Pipeline] Waiting for camera initialization...")
         # wait up to 10 seconds for camera to be ready
-        max_wait = 10; waited = 0
+        max_wait = 5; waited = 0
         while not self.streamer.is_ready() and waited < max_wait:
             await asyncio.sleep(0.5)
             waited += 0.5
         if not self.streamer.is_ready():
             print("[Pipeline] ERROR: Camera failed to initialize!")
+            self.streamer.stop()
             return
         print("[Pipeline] Camera ready, starting processing...")
         self.running = True
+        print("[Pipeline] Detection running...")
         try:
             while self.running:
                 await self.process_frame()
@@ -605,11 +616,10 @@ class TrafficMonitoringPipeline:
             y_offset += 25
         # Draw FPS
         cv2.putText(annotated, f"FPS: {self.fps_actual:.1f}", (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
         return annotated
 
 # PART 8: LOCAL TESTING WITHOUT FASTAPI SERVER ON DEVICE
-if __name__ == "__main__":
+async def main():
     """
     Local camera test without FastAPI server.
     Press 'q' to exit.
@@ -627,25 +637,36 @@ if __name__ == "__main__":
     print("[Test] Starting video streamer...")
     pipeline.streamer.start()
     print("Waiting for camera initialization...")
-    time.sleep(2)
-    print("Starting detection...")
-    print()    
+    max_wait = 4; waited = 0
+    while not pipeline.streamer.is_ready() and waited < max_wait:
+        await asyncio.sleep(0.5)
+        waited += 0.5
+    if not pipeline.streamer.is_ready():
+        print("[Pipeline] ERROR: Camera failed to initialize!")
+        pipeline.streamer.stop()
+        return
+    print("[Pipeline] Detection running...")
+    frame_id = 0
     try:
         while True:
-            # Get frame from camera
-            frame = pipeline.streamer.read()
+            start_time = time.time()
+            # Step 1: Get frame from camera
+            frame = await asyncio.to_thread(pipeline.streamer.get_frame)
             if frame is None:
-                print("Waiting for frame...")
-                time.sleep(0.1)
-                continue  
-            # Run YOLO11 detection
+                await asyncio.sleep(0.01)
+                return
+            # Step 2: Run YOLO11 detection
             detections = pipeline.detector.detect(frame)
-            # Update object tracker
+            # Step: 3 Update object tracker
             tracked_detections = pipeline.counter.update(detections)
             pipeline.current_detections = tracked_detections
-            pipeline.current_frame = frame
+            # Step 4: Prepare data for WebSocket and database
+            timestamp = datetime.now().isoformat()
+            total_count = pipeline.counter.get_total_count()
+            counts = pipeline.counter.get_counts()
             # Update frame counter and FPS metrics
             pipeline.frame_id += 1
+            print("Frame id", pipeline.frame_id)
             current_time = time.time()
             if current_time - pipeline.last_fps_update > 1.0:
                 if pipeline.frame_times:
@@ -653,25 +674,34 @@ if __name__ == "__main__":
                     pipeline.fps_actual = 1.0 / avg_time if avg_time > 0 else 0
                     pipeline.frame_times = []
                 pipeline.last_fps_update = current_time
-            # Get annotated frame with drawings
-            annotated = pipeline.get_annotated_frame()
-            #if annotated is not None:
-            #    # Display frame in OpenCV window
-            #    #cv2.imshow('YOLO11 Traffic Detection', annotated)
-            #    # Print statistics to console every 30 frames
-            #    if pipeline.frame_id % 30 == 0:
-            #        counts = pipeline.counter.get_counts()
-            #        print(f"Frame {pipeline.frame_id} | FPS: {pipeline.fps_actual:.1f} | "
-            #              f"Total: {pipeline.counter.get_total_count()} | {counts}")
-            # Measure frame processing time
-            frame_start = time.time()
-            # Check for exit key 'q'
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("\nShutting down...")
-                break
-            # Track frame processing time for FPS calculation
-            frame_time = time.time() - frame_start
-            pipeline.frame_times.append(frame_time)
+            print(tracked_detections)
+            detection_data_list = []
+            for det in tracked_detections:
+                detection_dict = {
+                    'timestamp': timestamp,
+                    'frame_id': pipeline.frame_id,
+                    'label': det.label,
+                    'confidence': det.confidence,
+                    'x1': det.bbox[0],
+                    'y1': det.bbox[1],
+                    'x2': det.bbox[2],
+                    'y2': det.bbox[3],
+                    'track_id': det.track_id,
+                    'total_count': total_count
+                }
+                detection_data_list.append(detection_dict)
+            print("Actual detections: ", detection_data_list)
+            elapsed = time.time() - start_time
+            pipeline.frame_times.append(elapsed)
+            # Calculate FPS every second
+            if time.time() - pipeline.last_fps_update > 1.0:
+                if pipeline.frame_times:
+                    avg_time = sum(pipeline.frame_times) / len(pipeline.frame_times)
+                    pipeline.fps_actual = 1.0 / avg_time if avg_time > 0 else 0
+                    pipeline.frame_times = []
+                pipeline.last_fps_update = time.time()
+            print(f"FPS:", pipeline.fps_actual)
+
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     except Exception as e:
@@ -689,4 +719,4 @@ if __name__ == "__main__":
         print(f"Count by type: {pipeline.counter.get_counts()}")
         print(f"Total frames processed: {pipeline.frame_id}")
 
-
+if __name__ == "__main__": asyncio.run(main())
