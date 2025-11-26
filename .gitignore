@@ -6,3 +6,14 @@ AI/yolo_files/yolov3.weights
 AI_traffic_detection_system/__pycache__
 AI_traffic_detection_system/rpi-venv/
 AI_traffic_detection_hailo/venv
+AI_traffic_detection_hailo/hailo_dataflow_compiler-3.33.0-py3-none-linux_x86_64.whl
+AI_traffic_detection_hailo/acceleras.log
+AI_traffic_detection_hailo/allocator.log
+AI_traffic_detection_hailo/hailo_sdk.client.log
+AI_traffic_detection_hailo/hailo_sdk.core.log
+AI_traffic_detection_hailo/hailo_sdk.core.1.log
+AI_traffic_detection_hailo/yolov8m.pt
+AI_traffic_detection_hailo/yolov8m.har
+AI_traffic_detection_hailo/yolov8m.onnx
+
+
