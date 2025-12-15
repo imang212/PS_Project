@@ -7,12 +7,24 @@ Tento návod popisuje proces konverze YOLOv8 modelu do Hailo HEF formátu pro in
 - Vyexportovaný ONNX model (např. `yolov8m.onnx`)
 - Python 3.11 prostředí s aktivovaným venv
 
-```python
+```bash
 python3.11 -m venv hailo_env
 source hailo_env/bin/activate
 pip install ultralytics
 pip install hailo_dataflow_compiler-3.33.0-py3-none-linux_x86_64.whl
 ```
+
+Modely pro hailo se dají stáhnout z repozitáře `https://github.com/hailo-ai/hailo_model_zoo/tree/master`, ale ne pro všechny, proto ho budem exportovat.
+
+
+## Vyexportování modelu
+```python
+from ultralytics import YOLO
+model = YOLO('yolov8m.pt')
+model.export(format='onnx')
+```
+
+
 
 ## Krok 1: Parsing ONNX modelu
 Převod ONNX modelu do Hailo HAR (Hailo Archive) formátu.

@@ -35,9 +35,18 @@ RUN apt-get update && apt-get install -y \
     libswresample-dev \
     libfreetype6 \
     libcamera0 \
-    # hailo-all \
-    # python3-picamera2 \
-    # libcamera-apps \
+    ffmpeg \
+    #hailo-all \
+    #python3-picamera2 \
+    #libcamera-apps \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    libgstrtspserver-1.0-dev \
+    gir1.2-gstreamer-1.0 \
+    python3-gi \
     && rm -rf /var/lib/apt/lists/*
 # Vytvoření pracovního adresáře
 WORKDIR /app
@@ -48,6 +57,7 @@ RUN python3.11 -m venv /app/venv --system-site-packages
 # Aktivace virtuálního prostředí a instalace základních balíčků
 RUN . /app/venv/bin/activate && \
     pip install --upgrade pip setuptools wheel
+    
 # Instalace dalších požadovaných balíčků z requirements.txt
 RUN . /app/venv/bin/activate && \
 pip install --no-cache-dir -r requirements.txt

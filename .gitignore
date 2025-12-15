@@ -1,7 +1,9 @@
 .venv/
 __pycache__/
+hailo_packages/
 fastapi_control_server/__pycache__
 Input/__pycache__
+tappas_3.31.0_linux_installer
 AI/yolo_files/yolov3.weights
 AI_traffic_detection_system/__pycache__
 AI_traffic_detection_system/rpi-venv/
@@ -15,5 +17,7 @@ AI_traffic_detection_hailo/hailo_sdk.core.1.log
 AI_traffic_detection_hailo/yolov8m.pt
 AI_traffic_detection_hailo/yolov8m.har
 AI_traffic_detection_hailo/yolov8m.onnx
+AI_traffic_detection_hailo/yolov8m_compiled.har
+AI_traffic_detection_hailo/yolov8m_optimized.har
 
 

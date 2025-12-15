@@ -1,493 +1,815 @@
-#!/usr/bin/env python3
-"""
-AI Traffic Detection System for Raspberry Pi AI HAT+ (26 TOPS)
-Uses YOLOv8m model with ONNX + Hailo acceleration and HailoTracker
-"""
+import gi
+gi.require_version('Gst', '1.0')
+gi.require_version('GstWebRTC', '1.0')
+gi.require_version('GstSdp', '1.0')
+from gi.repository import Gst, GLib, GstWebRTC, GstSdp
+import threading
 import asyncio
 import json
-import time
 from datetime import datetime
-from typing import List, Dict, Any
-import numpy as np
+import hailo
+#from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 import websockets
-from picamera2 import Picamera2
-from hailo_platform import (VDevice, HailoStreamInterface, InferVStreams, ConfigureParams, InputVStreamParams, OutputVStreamParams, FormatType)
+from aiohttp import web
 
-#0: SYSTEM CONFIGURATION
-class Config:
-    """Global application configuration"""
-    # Camera and inference resolution
-    CAMERA_WIDTH = 1536
-    CAMERA_HEIGHT = 864
-    # YOLOv8m Model
-    MODEL_PATH = "/path/to/yolov8m.hef"  # HEF = Hailo Executable Format
-    # WebSocket configuration
-    WEBSOCKET_HOST = "0.0.0.0"
-    WEBSOCKET_PORT = 8765
-    # Detection parameters
-    CONFIDENCE_THRESHOLD = 0.5
-    NMS_THRESHOLD = 0.4  # Non-Maximum Suppression
-    # COCO classes for traffic (YOLOv8 is trained on COCO dataset)
-    TRAFFIC_CLASSES = {2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck',1: 'bicycle', 0: 'person'}
+# User-defined class to be used in the callback function
+#class user_app_callback_class(app_callback_class):
+#    def __init__(self, config):
+#        super().__init__()
+#        self.config = config
+#        self.detected_cars = {}
+#        self.frame_count = 0
+#        print("[INIT] Car tracking initialized with WebSocket & streaming")
+#        print(f"[INIT] Detecting classes: {config.vehicle_classes}")
 
-#1: HAILO INFERENCE ENGINE
-class HailoInferenceEngine:
-    """
-    Class for managing Hailo inference with YOLOv8m model.
-    Handles model loading, VStreams configuration, and inference execution.
-    """
-    def __init__(self, model_path: str):
-        """
-        Initialize Hailo inference engine. 
-        Args:
-            model_path: Path to YOLOv8m model in HEF format
-        """
-        self.model_path = model_path
-        self.device = None
-        self.network_group = None
-        self.input_vstreams = None
-        self.output_vstreams = None
-        self.tracker = None
-        
-    def initialize(self):
-        """
-        Initialize Hailo device and load model.
-        Steps:
-        1. Create VDevice object (virtual Hailo device)
-        2. Load HEF file with YOLOv8m model
-        3. Configure network group
-        4. Set up input/output VStreams for data flow
-        5. Initialize HailoTracker for object tracking
-        """
-        print("[INIT] Initializing Hailo AI HAT+...")
-        # Step 1: Create virtual Hailo device
-        self.device = VDevice()
-        # Step 2: Load model
-        print(f"[INIT] Loading YOLOv8m model from: {self.model_path}")
-        hef = self.device.create_hef_file(self.model_path) # Load HEF
-        # Step 3: Configure network group
-        network_group_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
-        self.network_group = self.device.configure(hef, network_group_params)[0]
-        # Step 4: Set up VStreams
-        # Input stream - data from camera to Hailo chip
-        input_vstream_params = InputVStreamParams.make_from_network_group(
-            self.network_group,
-            format_type=FormatType.UINT8  # 8-bit unsigned integer (RGB)
-        )
-        # Output stream - detections from Hailo chip
-        output_vstream_params = OutputVStreamParams.make_from_network_group(
-            self.network_group,
-            format_type=FormatType.FLOAT32  # 32-bit float (bounding boxes + confidence)
-        )
-        self.input_vstreams = InferVStreams(self.network_group, input_vstream_params)
-        self.output_vstreams = InferVStreams(self.network_group, output_vstream_params)
-        # Step 5: Initialize HailoTracker
-        from hailo_tracker import HailoTracker
-        self.tracker = HailoTracker(
-            max_lost_frames=30,  # Object "disappears" after 30 frames without detection
-            iou_threshold=0.3     # Threshold for matching objects between frames
-        )
-        print("[INIT] Hailo engine initialized successfully")
-        
-    def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Preprocess frame for YOLOv8m model.
-        Args:
-            frame: RGB frame from camera (1536x864x3)
-        Returns: Preprocessed frame ready for inference
-        Steps:
-        1. Normalize pixels (0-255 -> 0-1)
-        2. Change dimension order (HWC -> CHW) for ONNX
-        3. Add batch dimension
-        """
-        # Normalize to range 0-1
-        frame_normalized = frame.astype(np.float32) / 255.0
-        # Change from (Height, Width, Channels) to (Channels, Height, Width)
-        frame_transposed = np.transpose(frame_normalized, (2, 0, 1))
-        # Add batch dimension: (1, C, H, W)
-        frame_batched = np.expand_dims(frame_transposed, axis=0)
-        # return preprocessed frame
-        return frame_batched
-    
-    def postprocess_detections(self, output: np.ndarray, frame_id: int) -> List[Dict[str, Any]]:
-        """
-        Postprocess output from YOLOv8m model.
-        Args:
-            output: Raw output from Hailo chip
-            frame_id: Current frame ID
-        Returns: List of detections with tracking ID
-        Steps:
-        1. Parse output tensor (bounding boxes, confidence, classes)
-        2. Apply confidence threshold
-        3. Non-Maximum Suppression (remove duplicates)
-        4. Track objects using HailoTracker
-        5. Filter only traffic classes
-        """
-        detections = []
-        # Step 1: Parse YOLOv8 output format
-        # YOLOv8 output: [batch, num_detections, 85]
-        # where 85 = [x, y, w, h, confidence, class_0_prob, ..., class_79_prob]
-        for detection in output[0]:  # batch=1, so we take [0]
-            x_center, y_center, width, height = detection[0:4]
-            confidence = detection[4]
-            class_probs = detection[5:]
-            # Step 2: Confidence filtering
-            if confidence < Config.CONFIDENCE_THRESHOLD:
-                continue
-            # Get class with highest probability
-            class_id = int(np.argmax(class_probs))
-            class_confidence = class_probs[class_id]
-            # Step 5: Filter traffic classes
-            if class_id not in Config.TRAFFIC_CLASSES:
-                continue
-            # Convert from center format to corner format (x1, y1, x2, y2)
-            x1 = int((x_center - width / 2) * Config.CAMERA_WIDTH)
-            y1 = int((y_center - height / 2) * Config.CAMERA_HEIGHT)
-            x2 = int((x_center + width / 2) * Config.CAMERA_WIDTH)
-            y2 = int((y_center + height / 2) * Config.CAMERA_HEIGHT)
-            detections.append({
-                'bbox': [x1, y1, x2, y2],
-                'confidence': float(confidence * class_confidence),
-                'class_id': class_id,
-                'class_name': Config.TRAFFIC_CLASSES[class_id]
-            })
-        # Step 3: Non-Maximum Suppression
-        detections = self._apply_nms(detections)
-        # Step 4: Tracking
-        tracked_detections = self.tracker.update(detections, frame_id)
-        return tracked_detections
-    
-    def _apply_nms(self, detections: List[Dict]) -> List[Dict]:
-        """
-        Non-Maximum Suppression - remove overlapping detections.
-        Args:
-            detections: List of all detections
-        Returns: Filtered list without duplicates
-        """
-        if len(detections) == 0: return []
-        # Extract bounding boxes and confidence scores
-        boxes = np.array([d['bbox'] for d in detections])
-        scores = np.array([d['confidence'] for d in detections])
-        # Calculate areas
-        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-        areas = (x2 - x1) * (y2 - y1)
-        # Sort by confidence (descending)
-        order = scores.argsort()[::-1]
-        # Apply NMS
-        keep = []
-        while order.size > 0:
-            i = order[0]
-            keep.append(i)
-            # Calculate IoU (Intersection over Union)
-            xx1 = np.maximum(x1[i], x1[order[1:]])
-            yy1 = np.maximum(y1[i], y1[order[1:]])
-            xx2 = np.minimum(x2[i], x2[order[1:]])
-            yy2 = np.minimum(y2[i], y2[order[1:]])
-            w = np.maximum(0.0, xx2 - xx1)
-            h = np.maximum(0.0, yy2 - yy1)
-            intersection = w * h
-            iou = intersection / (areas[i] + areas[order[1:]] - intersection)
-            # Keep only detections with IoU < threshold
-            inds = np.where(iou <= Config.NMS_THRESHOLD)[0]
-            # Update order
-            order = order[inds + 1]
-        # return filtered detections
-        return [detections[i] for i in keep]
-    
-    def infer(self, frame: np.ndarray, frame_id: int) -> List[Dict[str, Any]]:
-        """
-        Perform inference on a single frame.
-        Args:
-            frame: RGB frame from camera
-            frame_id: Frame ID
-        Returns: List of detections with tracking information
-        """
-        # Preprocessing
-        processed_frame = self.preprocess_frame(frame)
-        # Inference on Hailo chip (HW acceleration!)
-        with self.input_vstreams as input_stream, self.output_vstreams as output_stream:
-            # Send data to Hailo chip
-            input_stream.send(processed_frame)
-            # Receive results from Hailo chip
-            output = output_stream.recv()
-        # Postprocessing and tracking
-        detections = self.postprocess_detections(output, frame_id)
-        return detections
-    
-    def cleanup(self):
-        """Shutdown and release resources"""
-        if self.network_group:
-            self.network_group.release()
-        if self.device:
-            self.device.release()
-        print("[CLEANUP] Hailo engine terminated")
-
-#2: CAMERA MANAGER
-class CameraManager:
-    """
-    IMX708 camera management using picamera2.
-    Provides continuous frame capture at optimal resolution.
-    """
+# Configuration Class
+class DetectionConfig:
+    """Configuration options for car detection and streaming"""
     def __init__(self):
-        """Initialize camera manager"""
-        self.camera = None
-        self.is_running = False
-        
-    def initialize(self):
-        """
-        Initialize camera with optimized configuration. 
-        Steps:
-        1. Create Picamera2 instance
-        2. Configure for 1536x864 resolution (Hailo HW acceleration)
-        3. Set frame rate and format
-        4. Start camera
-        """
-        print("[CAMERA] Initializing IMX708 camera...")
-        self.camera = Picamera2()
-        # Configure camera for Hailo-optimized resolution
-        config = self.camera.create_still_configuration(
-            main={ "size": (Config.CAMERA_WIDTH, Config.CAMERA_HEIGHT), "format": "RGB888"},
-            buffer_count=4  # Buffering for smooth capture
-        )
-        self.camera.configure(config)
-        # start camera
-        self.camera.start()
-        self.is_running = True
-        print(f"[CAMERA] Camera started: {Config.CAMERA_WIDTH}x{Config.CAMERA_HEIGHT}")
-        
-    def capture_frame(self) -> np.ndarray:
-        """
-        Capture a single frame from camera.
-        Returns: RGB frame as numpy array (1536x864x3)
-        """
-        if not self.is_running:
-            raise RuntimeError("Camera is not running")
-        frame = self.camera.capture_array()
-        return frame
-    
-    def cleanup(self):
-        """Shutdown camera"""
-        if self.camera and self.is_running:
-            self.camera.stop()
-            self.is_running = False
-            print("[CAMERA] Camera terminated")
+        # Detection settings
+        self.vehicle_classes = {3: 'car', 6: 'bus', 8: 'truck'}
+        self.track_class_id = 3  # Primary class to track (car)
+        self.confidence_threshold = 0.5
+        self.iou_threshold = 0.45
+        # Video settings
+        self.camera_type = 'ip'  # 'rpicam' or 'ip'
+        self.ip_camera_url = 'rtsp://admin:password@192.168.1.100:554/stream'
+        self.video_width = 1920
+        self.video_height = 1080
+        self.video_fps = 30
+        self.video_format = 'RGB'
+        # Network settings (WS, RTSP, WebRTC)
+        self.ws_host = '0.0.0.0'
+        self.ws_port = 8765
+        self.http_port = 8080
+        self.rtsp_port = 8554
+        # WebRTC settings
+        self.webrtc_stun_server = 'stun:stun.l.google.com:19302'
+        self.webrtc_video_bitrate = 2000000  # 2 Mbps
+        # RTSP settings
+        self.rtsp_mount_point = '/stream'
+        self.rtsp_latency = 200  # ms
+        # Debug settings
+        self.debug_mode = True
+        self.summary_interval = 30  # frames
 
-#3: WEBSOCKET SERVER
+    def print_config(self):
+        """Print current configuration"""
+        print("\n" + "="*60)
+        print("DETECTION CONFIGURATION")
+        print("="*60)
+        print(f"Camera Type: {self.camera_type}")
+        if self.camera_type == 'ip':
+            print(f"IP Camera URL: {self.ip_camera_url}")
+        print(f"Camera: {self.video_width}x{self.video_height} @ {self.video_fps}fps")
+        print(f"Vehicle Classes: {self.vehicle_classes}")
+        print(f"Track Class ID: {self.track_class_id}")
+        print(f"Confidence Threshold: {self.confidence_threshold}")
+        print(f"WebSocket: ws://{self.ws_host}:{self.ws_port}")
+        print(f"HTTP/WebRTC: http://{self.ws_host}:{self.http_port}")
+        print(f"RTSP: rtsp://{self.ws_host}:{self.rtsp_port}{self.rtsp_mount_point}")
+        print("="*60 + "\n")
+
+# WebSocket Server Class
 class WebSocketServer:
-    """
-    WebSocket server for real-time detection streaming.
-    Sends detected object data to clients.
-    """    
-    def __init__(self, host: str, port: int):
-        """
-        Initialize WebSocket server. 
-        Args:
-            host: Server IP address
-            port: Server port
-        """
-        self.host = host
-        self.port = port
-        self.clients = set()
+    """Manages WebSocket connections and broadcasts detection data"""
+    def __init__(self, config):
+        self.config = config
+        self.connected_clients = set()
+        self.loop = None
         self.server = None
         
-    async def register_client(self, websocket):
-        """
-        Register a new client.
-        Args:
-            websocket: WebSocket connection object
-        """
-        self.clients.add(websocket)
-        print(f"[WEBSOCKET] New client connected. Total clients: {len(self.clients)}")
-        
-    async def unregister_client(self, websocket):
-        """Unregister a client"""
-        self.clients.remove(websocket)
-        print(f"[WEBSOCKET] Client disconnected. Total clients: {len(self.clients)}")
-        
-    async def broadcast_detections(self, detections_data: Dict[str, Any]):
-        """
-        Send detections to all connected clients.
-        Args:
-            detections_data: Dictionary with detection data
-        Data format:
-        {
-            'timestamp': ISO timestamp,
-            'frame_id': Frame ID,
-            'detections': [
-                {
-                    'track_id': Tracked object ID,
-                    'label': Class name,
-                    'confidence': Confidence score (0-1),
-                    'x1', 'y1', 'x2', 'y2': Bounding box coordinates
+    async def handle_client(self, websocket, path):
+        """Handle individual WebSocket client connection"""
+        self.connected_clients.add(websocket)
+        client_addr = websocket.remote_address
+        print(f"[WS] Client connected: {client_addr}")
+        try:
+            # Send initial connection message
+            await websocket.send(json.dumps({
+                'type': 'connection',
+                'status': 'connected',
+                'message': 'Car tracking WebSocket connected',
+                'config': {
+                    'width': self.config.video_width,
+                    'height': self.config.video_height,
+                    'fps': self.config.video_fps
                 }
-            ],
-            'count': Total number of detected objects
-        }
-        """
-        if not self.clients: return
-        # Serialize to JSON
-        message = json.dumps(detections_data)
-        # Broadcast to all clients
-        disconnected = set()
-        for client in self.clients:
-            try:
-                await client.send(message)
-            except websockets.exceptions.ConnectionClosed:
-                disconnected.add(client)
-        # Remove disconnected clients
-        for client in disconnected:
-            await self.unregister_client(client)
-    
-    async def handler(self, websocket, path):
-        """
-        Handler for WebSocket connections.
-        Args:
-            websocket: WebSocket connection
-            path: URL path (endpoint)
-        """
-        await self.register_client(websocket)
-        try:
-            # Keep connection alive
+            }))
+            # Keep connection alive and handle messages
             async for message in websocket:
-                # Can receive configuration messages from clients
-                pass
+                try:
+                    data = json.loads(message)
+                    if data.get('type') == 'ping':
+                        await websocket.send(json.dumps({'type': 'pong'}))
+                except json.JSONDecodeError:
+                    pass
+        except websockets.exceptions.ConnectionClosed:
+            print(f"[WS] Client disconnected: {client_addr}")
         finally:
-            await self.unregister_client(websocket)
+            self.connected_clients.remove(websocket)
     
-    async def start(self):
-        """Start WebSocket server"""
-        self.server = await websockets.serve(
-            self.handler,
-            self.host,
-            self.port
+    async def broadcast(self, data):
+        """Broadcast detection data to all connected clients"""
+        if self.connected_clients:
+            message = json.dumps(data)
+            await asyncio.gather(
+                *[client.send(message) for client in self.connected_clients],
+                return_exceptions=True
+            )
+    
+    def start(self):
+        """Start WebSocket server in a separate thread"""
+        def run_server():
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            start_server = websockets.serve(self.handle_client, self.config.ws_host, self.config.ws_port)
+            print(f"[WS] WebSocket server started on ws://{self.config.ws_host}:{self.config.ws_port}")
+            self.loop.run_until_complete(start_server)
+            self.loop.run_forever()        
+        ws_thread = threading.Thread(target=run_server, daemon=True)
+        ws_thread.start()
+
+# WebRTC Server Class
+class WebRTCServer:
+    """Manages WebRTC peer connections and streaming"""    
+    def __init__(self, config):
+        self.config = config
+        self.peers = {}
+        self.peer_id_counter = 0
+        self.pipeline = None
+        
+    def set_pipeline(self, pipeline):
+        """Set the GStreamer pipeline reference"""
+        self.pipeline = pipeline
+    
+    def create_webrtc_bin(self, peer_id):
+        """Create WebRTC bin and add to pipeline"""
+        if not self.pipeline:
+            print("[WebRTC ERROR] Pipeline not set")
+            return None            
+        print(f"[WebRTC] Creating WebRTC bin for peer {peer_id}")
+        # Create webrtcbin element
+        webrtcbin = Gst.ElementFactory.make("webrtcbin", f"webrtc_{peer_id}")
+        webrtcbin.set_property("bundle-policy", "max-bundle")
+        webrtcbin.set_property("stun-server", self.config.webrtc_stun_server)
+        # Add to pipeline
+        self.pipeline.add(webrtcbin)
+        # Get the tee element from the pipeline
+        tee = self.pipeline.get_by_name("video_tee")
+        if not tee:
+            print("[WebRTC ERROR] No tee element found in pipeline")
+            return None
+        # Create queue for this WebRTC stream
+        queue = Gst.ElementFactory.make("queue", f"queue_webrtc_{peer_id}")
+        videoconvert = Gst.ElementFactory.make("videoconvert", f"convert_webrtc_{peer_id}")
+        x264enc = Gst.ElementFactory.make("x264enc", f"x264enc_{peer_id}")
+        rtph264pay = Gst.ElementFactory.make("rtph264pay", f"rtph264pay_{peer_id}")
+        # Configure encoder
+        x264enc.set_property("bitrate", self.config.webrtc_video_bitrate // 1000)
+        x264enc.set_property("speed-preset", "ultrafast")
+        x264enc.set_property("tune", "zerolatency")
+        # Configure payloader
+        rtph264pay.set_property("config-interval", 1)
+        rtph264pay.set_property("pt", 96)
+        # Add elements to pipeline
+        self.pipeline.add(queue)
+        self.pipeline.add(videoconvert)
+        self.pipeline.add(x264enc)
+        self.pipeline.add(rtph264pay)
+        # Link: tee -> queue -> videoconvert -> x264enc -> rtph264pay -> webrtcbin
+        tee.link(queue)
+        queue.link(videoconvert)
+        videoconvert.link(x264enc)
+        x264enc.link(rtph264pay)
+        rtph264pay.link(webrtcbin)
+        # Sync state
+        queue.sync_state_with_parent()
+        videoconvert.sync_state_with_parent()
+        x264enc.sync_state_with_parent()
+        rtph264pay.sync_state_with_parent()
+        webrtcbin.sync_state_with_parent()
+        return webrtcbin
+    
+    async def handle_offer(self, request):
+        """Handle WebRTC offer from client"""
+        params = await request.json()
+        peer_id = self.peer_id_counter
+        self.peer_id_counter += 1
+        print(f"[WebRTC] Received offer from peer {peer_id}")
+        # Create WebRTC bin
+        webrtcbin = self.create_webrtc_bin(peer_id)
+        if not webrtcbin: return web.Response(status=500, text="Failed to create WebRTC bin")
+        # Store peer connection
+        self.peers[peer_id] = {'webrtcbin': webrtcbin, 'peer_id': peer_id}
+        # Handle ICE candidates
+        def on_ice_candidate(webrtc, mline, candidate):
+            print(f"[WebRTC] ICE candidate: {candidate}")
+        webrtcbin.connect("on-ice-candidate", on_ice_candidate)
+        # Set remote description (offer)
+        offer_sdp = params["sdp"]
+        ret, sdp_msg = GstSdp.SDPMessage.new()
+        GstSdp.sdp_message_parse_buffer(bytes(offer_sdp.encode()), sdp_msg)
+        offer = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.OFFER, sdp_msg)
+        promise = Gst.Promise.new()
+        webrtcbin.emit("set-remote-description", offer, promise)
+        promise.interrupt()
+        # Create answer
+        def on_answer_created(promise):
+            promise.wait()
+            reply = promise.get_reply()
+            answer = reply.get_value("answer")
+            promise2 = Gst.Promise.new()
+            webrtcbin.emit("set-local-description", answer, promise2)
+            promise2.interrupt()        
+            # Get SDP text
+            answer_sdp = answer.sdp.as_text()
+            print(f"[WebRTC] Created answer for peer {peer_id}")
+            # Store for retrieval
+            self.peers[peer_id]['answer_sdp'] = answer_sdp
+        promise = Gst.Promise.new_with_change_func(lambda p, _: on_answer_created(p), None)
+        webrtcbin.emit("create-answer", None, promise)
+        # Wait for answer to be created
+        await asyncio.sleep(0.5)
+        answer_sdp = self.peers[peer_id].get('answer_sdp', '')
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"sdp": answer_sdp, "type": "answer", "peer_id": peer_id})
         )
-        print(f"[WEBSOCKET] Server started at ws://{self.host}:{self.port}")
-        
-#4: MAIN APPLICATION
-class TrafficDetectionApp:
-    """
-    Main application for traffic detection.
-    Combines camera, Hailo inference, and WebSocket communication.
-    """    
-    def __init__(self):
-        """Initialize application"""
-        self.camera = CameraManager()
-        self.inference = HailoInferenceEngine(Config.MODEL_PATH)
-        self.websocket = WebSocketServer(Config.WEBSOCKET_HOST, Config.WEBSOCKET_PORT)
-        self.frame_id = 0
-        self.is_running = False
-        
-    async def initialize(self):
-        """
-        Initialize all components. 
-        Steps:
-        1. Initialize camera
-        2. Initialize Hailo inference engine
-        3. Start WebSocket server
-        """
-        print("=" * 70)
-        print("TRAFFIC DETECTION AI - Raspberry Pi AI HAT+ (26 TOPS)")
-        # Initialize components
-        self.camera.initialize()
-        self.inference.initialize()
-        await self.websocket.start()
-        # Mark application as running
-        self.is_running = True
-        print("\n[APP] System ready for traffic detection\n")
     
-    def process_frame(self) -> Dict[str, Any]:
+    def cleanup(self):
+        """Cleanup all WebRTC connections"""
+        for peer_id, peer in self.peers.items():
+            peer['webrtcbin'].set_state(Gst.State.NULL)
+        self.peers.clear()
+
+# HTTP Server Class
+class HTTPServer:
+    """Manages HTTP server for WebRTC signaling and web interface"""
+    def __init__(self, config, webrtc_server):
+        self.config = config
+        self.webrtc_server = webrtc_server
+        
+    async def index(self, request):
+        """Serve WebRTC client HTML page"""
+        content = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Car Detection Stream</title>
+            <style>body { font-family: Arial, sans-serif; margin: 20px; background: #1a1a1a; color: #fff; } video { width: 100%; max-width: 1280px; background: #000; border: 2px solid #333; border-radius: 8px; } .container { max-width: 1280px; margin: 0 auto; } .info { background: #2a2a2a; padding: 15px; margin: 10px 0; border-radius: 5px; } .detection { background: #3a3a3a; padding: 10px; margin: 5px 0; border-left: 3px solid #4CAF50; } .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0; } .stat { background: #2a2a2a; padding: 10px; text-align: center; border-radius: 5px; } .stat-value { font-size: 24px; font-weight: bold; color: #4CAF50; } h1 { color: #4CAF50; } button { background: #4CAF50; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 5px; margin: 5px; } button:hover { background: #45a049; } button:disabled { background: #666; cursor: not-allowed; } .controls { margin: 15px 0; } </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Car Detection & Tracking System</h1>        
+                <div class="controls">
+                    <button id="startBtn" onclick="startStream()">Start Stream</button>
+                    <button id="stopBtn" onclick="stopStream()" disabled>Stop Stream</button>
+                </div>
+                <video id="video" autoplay playsinline></video>
+                <div class="stats">
+                    <div class="stat">
+                        <div>WebSocket</div>
+                        <div class="stat-value" id="wsStatus">❌</div>
+                    </div>
+                    <div class="stat">
+                        <div>WebRTC</div>
+                        <div class="stat-value" id="rtcStatus">❌</div>
+                    </div>
+                    <div class="stat">
+                        <div>Detections</div>
+                        <div class="stat-value" id="detCount">0</div>
+                    </div>
+                    <div class="stat">
+                        <div>Frame</div>
+                        <div class="stat-value" id="frameCount">0</div>
+                    </div>
+                </div>
+                <div class="info">
+                    <h3>Live Detections</h3>
+                    <div id="detections"></div>
+                </div>
+            </div>
+            <script>
+                let pc = null;
+                let ws = null;
+                let detectionCount = 0;
+                function connectWebSocket() {
+                    ws = new WebSocket('ws://' + window.location.hostname + ':8765');
+                    ws.onopen = () => {
+                        console.log('WebSocket Connected');
+                        document.getElementById('wsStatus').textContent = '✅';
+                    };            
+                    ws.onclose = () => {
+                        document.getElementById('wsStatus').textContent = '❌';
+                        setTimeout(connectWebSocket, 2000);
+                    };
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);  
+                        if (data.type === 'detection') {
+                            detectionCount++;
+                            document.getElementById('detCount').textContent = detectionCount;
+                            document.getElementById('frameCount').textContent = data.frame;
+                            const detectionsDiv = document.getElementById('detections');
+                            const det = document.createElement('div');
+                            det.className = 'detection';
+                            det.innerHTML = `
+                                <strong>${data.class_name.toUpperCase()}</strong> | 
+                                Track ID: ${data.track_id} | 
+                                Confidence: ${(data.confidence * 100).toFixed(1)}% | 
+                                BBox: (${data.bbox.x.toFixed(0)}, ${data.bbox.y.toFixed(0)}, ${data.bbox.width.toFixed(0)}x${data.bbox.height.toFixed(0)})
+                            `;
+                            detectionsDiv.insertBefore(det, detectionsDiv.firstChild);
+                            if (detectionsDiv.children.length > 10) {
+                                detectionsDiv.removeChild(detectionsDiv.lastChild);
+                            }
+                        }
+                    };
+                }
+                async function startStream() {
+                    const config = {
+                        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                    };
+                    pc = new RTCPeerConnection(config);
+                    pc.ontrack = (event) => {
+                        console.log('Received track:', event.track.kind);
+                        document.getElementById('video').srcObject = event.streams[0];
+                        document.getElementById('rtcStatus').textContent = '✅';
+                    };
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            console.log('ICE candidate:', event.candidate);
+                        }
+                    };
+                    pc.onconnectionstatechange = () => {
+                        console.log('Connection state:', pc.connectionState);
+                        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                            document.getElementById('rtcStatus').textContent = '❌';
+                        }
+                    };
+                    // Create offer
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    // Send offer to server
+                    const response = await fetch('/offer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            sdp: offer.sdp,
+                            type: offer.type
+                        })
+                    });
+                    const answer = await response.json();
+                    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                    console.log('WebRTC connection established');
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                }
+                function stopStream() {
+                    if (pc) {
+                        pc.close();
+                        pc = null;
+                        document.getElementById('video').srcObject = null;
+                        document.getElementById('rtcStatus').textContent = '❌';
+                        document.getElementById('startBtn').disabled = false;
+                        document.getElementById('stopBtn').disabled = true;
+                    }
+                }
+                // Connect WebSocket on load
+                connectWebSocket();
+            </script>
+        </body>
+        </html>
         """
-        Process a single frame.
-        Returns: Dictionary with detections ready for sending
-        Steps:
-        1. Capture frame from camera
-        2. Perform inference on Hailo chip
-        3. Prepare data for WebSocket
-        """
-        # Step 1: Capture frame
-        frame = self.camera.capture_frame()
-        # Step 2: Inference
-        detections = self.inference.infer(frame, self.frame_id)
-        # Step 3: Prepare data
-        timestamp = datetime.utcnow().isoformat() + "Z"
-        # Format detections for output
-        detections_list = []
-        for det in detections:
-            detections_list.append({
-                'track_id': det.get('track_id', -1),
-                'label': det['class_name'],
-                'confidence': round(det['confidence'], 3),
-                'x1': det['bbox'][0],
-                'y1': det['bbox'][1],
-                'x2': det['bbox'][2],
-                'y2': det['bbox'][3]
-            })
-        # Compile result
-        result = {
-            'timestamp': timestamp,
-            'frame_id': self.frame_id,
-            'detections': detections_list,
-            'count': len(detections_list)
-        }
-        # Increment frame ID
-        self.frame_id += 1
-        return result
+        return web.Response(content_type="text/html", text=content)
     
-    async def run(self):
+    def start(self):
+        """Start HTTP server in a separate thread"""
+        def run_server():
+            app = web.Application()
+            app.router.add_get("/", self.index)
+            app.router.add_post("/offer", self.webrtc_server.handle_offer)
+            print(f"[HTTP] Web interface available at http://0.0.0.0:{self.config.http_port}")
+            web.run_app(app, host='0.0.0.0', port=self.config.http_port, print=None)
+        http_thread = threading.Thread(target=run_server, daemon=True)
+        http_thread.start()
+
+# Detection Pipeline Class
+class DetectionPipeline:
+    """Manages GStreamer pipeline with Hailo detection and tracking""" 
+    def __init__(self, config, websocket_server):
+        self.config = config
+        self.websocket_server = websocket_server
+        self.pipeline = None
+        self.detected_cars = {}
+        self.frame_count = 0
+        self.main_loop = None
+        self.detection_queue = asyncio.Queue()  # Queue for async detection processing
+        
+    def create_ip_camera_source(self):
+        """Create IP camera source pipeline string"""
+        return f"""
+            rtspsrc location={self.config.ip_camera_url} latency={self.config.rtsp_latency} ! 
+            rtph264depay ! 
+            h264parse ! 
+            avdec_h264 ! 
+            videoconvert ! 
+            videoscale ! 
+            video/x-raw,format={self.config.video_format},width={self.config.video_width},height={self.config.video_height} !
         """
-        Main application loop.  
-        Continuously:
-        1. Processes frames from camera
-        2. Performs detection using YOLOv8m
-        3. Sends results via WebSocket
-        4. Logs statistics
+    
+    def create_rpicam_source(self):
+        """Create Raspberry Pi camera source pipeline string"""
+        return f"""
+            libcamerasrc ! 
+            video/x-raw,format={self.config.video_format},width={self.config.video_width},height={self.config.video_height},framerate={self.config.video_fps}/1 !
         """
-        print("[APP] Starting detection loop...\n")
-        fps_counter = 0
-        fps_start = time.time()
+    
+    def detection_callback(self, pad, info):
+        """Callback function for processing detections"""
+        buffer = info.get_buffer()
+        if buffer is None:
+            return Gst.PadProbeReturn.OK
+        self.frame_count += 1
+        # Get detections from buffer
+        roi = hailo.get_roi_from_buffer(buffer)
+        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        if len(detections) > 0 and self.config.debug_mode:
+            print(f"\n[FRAME {self.frame_count}] Detected {len(detections)} object(s)")
+        # Process detections
+        detection_list = []
+        for detection in detections:
+            class_id = detection.get_class_id()
+            # Only process vehicle detections
+            if class_id not in self.config.vehicle_classes:
+                continue
+            # Get tracking ID
+            track_id = 0
+            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+            if len(track) > 0:
+                track_id = track[0].get_id()
+            # Get detection details
+            bbox = detection.get_bbox()
+            confidence = detection.get_confidence()
+            # Filter by confidence threshold
+            if confidence < self.config.confidence_threshold:
+                continue
+            class_name = self.config.vehicle_classes[class_id]
+            # Debug output
+            if self.config.debug_mode:
+                print(f"  [DETECTION] {class_name.upper()} | Track ID: {track_id} | "
+                      f"Confidence: {confidence:.2f} | "
+                      f"BBox: ({bbox.xmin():.0f}, {bbox.ymin():.0f}, "
+                      f"{bbox.width():.0f}x{bbox.height():.0f})")
+            # Track unique vehicles
+            if track_id not in self.detected_cars:
+                self.detected_cars[track_id] = {
+                    'first_seen': self.frame_count,
+                    'class': class_name,
+                    'count': 0
+                }
+                if self.config.debug_mode:
+                    print(f"    -> NEW {class_name} tracked (ID: {track_id})")
+            self.detected_cars[track_id]['count'] += 1
+            self.detected_cars[track_id]['last_seen'] = self.frame_count
+            # Prepare data for WebSocket broadcast
+            detection_data = {
+                'type': 'detection',
+                'timestamp': current_time,
+                'frame': self.frame_count,
+                'track_id': track_id,
+                'class_name': class_name,
+                'confidence': confidence,
+                'bbox': {
+                    'x': bbox.xmin(),
+                    'y': bbox.ymin(),
+                    'width': bbox.width(),
+                    'height': bbox.height()
+                }
+            }
+            detection_list.append(detection_data)
+        # Put detections in async queue for processing
+        if detection_list:
+            try:
+                self.detection_queue.put_nowait(detection_list)
+            except asyncio.QueueFull:
+                print("[WARNING] Detection queue full, dropping frame")
+        # Print summary
+        if (self.frame_count % self.config.summary_interval == 0 and 
+            len(self.detected_cars) > 0 and self.config.debug_mode):
+            print(f"\n[SUMMARY] Total unique vehicles tracked: {len(self.detected_cars)}")
+            for track_id, info in self.detected_cars.items():
+                print(f"  Track {track_id}: {info['class']} - "
+                      f"seen {info['count']} times "
+                      f"(frames {info['first_seen']}-{info.get('last_seen', info['first_seen'])})")
+        return Gst.PadProbeReturn.OK
+    
+    async def process_detections_async(self):
+        """Async task that processes detections from the queue"""
+        print("[ASYNC] Starting async detection processor...")
         try:
-            while self.is_running:
-                # Process frame
-                detections_data = self.process_frame()
-                # Send via WebSocket
-                await self.websocket.broadcast_detections(detections_data)
-                # FPS monitoring
-                fps_counter += 1
-                if fps_counter % 30 == 0:  # Every 30 frames
-                    fps = 30 / (time.time() - fps_start)
-                    print(f"[STATS] Frame: {self.frame_id} | "
-                          f"FPS: {fps:.1f} | "
-                          f"Detections: {detections_data['count']} | "
-                          f"Clients: {len(self.websocket.clients)}")
-                    fps_start = time.time()
-                # Minimal delay for stability (can be removed for max FPS)
-                await asyncio.sleep(0.001)
-        except KeyboardInterrupt:
-            print("\n[APP] Shutting down on user request...")
-        finally:
-            await self.cleanup()
+            while True:
+                # Wait for detections from the queue
+                detection_list = await self.detection_queue.get()
+                # Broadcast each detection via WebSocket
+                for detection_data in detection_list:
+                    if self.websocket_server.connected_clients:
+                        await self.websocket_server.broadcast(detection_data)
+                # Mark task as done
+                self.detection_queue.task_done()
+        except asyncio.CancelledError:
+            print("[ASYNC] Detection processor cancelled")
+            raise
+
+    def create_pipeline(self):
+        """Create and configure the GStreamer pipeline"""
+        print("[PIPELINE] Creating GStreamer pipeline...")
+        # Create pipeline
+        self.pipeline = Gst.Pipeline.new("detection-pipeline")
+        # Determine camera source
+        if self.config.camera_type == 'ip':
+            print(f"[PIPELINE] Using IP camera: {self.config.ip_camera_url}")
+            # IP Camera source
+            source = Gst.ElementFactory.make("rtspsrc", "camera-source")
+            source.set_property("location", self.config.ip_camera_url)
+            source.set_property("latency", self.config.rtsp_latency)
+            depay = Gst.ElementFactory.make("rtph264depay", "depay")
+            parse = Gst.ElementFactory.make("h264parse", "parse")
+            decode = Gst.ElementFactory.make("avdec_h264", "decode")
+            self.pipeline.add(source)
+            self.pipeline.add(depay)
+            self.pipeline.add(parse)
+            self.pipeline.add(decode)
+            # Link depay -> parse -> decode
+            depay.link(parse)
+            parse.link(decode)
+            # Connect source pad dynamically (RTSP creates pads dynamically)
+            def on_pad_added(src, pad):
+                sink_pad = depay.get_static_pad("sink")
+                if not sink_pad.is_linked():
+                    pad.link(sink_pad)
+            source.connect("pad-added", on_pad_added)
+            # Last element to link with the rest of the pipeline
+            last_element = decode
+        else:  # rpicam
+            print("[PIPELINE] Using Raspberry Pi camera")
+            source = Gst.ElementFactory.make("libcamerasrc", "camera-source")
+            caps_filter = Gst.ElementFactory.make("capsfilter", "caps")
+            caps = Gst.Caps.from_string(
+                f"video/x-raw,format={self.config.video_format},"
+                f"width={self.config.camera_width},"
+                f"height={self.config.camera_height},"
+                f"framerate={self.config.camera_fps}/1"
+            )
+            caps_filter.set_property("caps", caps)
+            self.pipeline.add(source)
+            self.pipeline.add(caps_filter)
+            source.link(caps_filter)
+            last_element = caps_filter
+        # Common pipeline elements
+        videoconvert = Gst.ElementFactory.make("videoconvert", "convert")
+        videoscale = Gst.ElementFactory.make("videoscale", "scale")
+        caps_filter2 = Gst.ElementFactory.make("capsfilter", "caps2")
+        caps2 = Gst.Caps.from_string(
+            f"video/x-raw,format={self.config.video_format},"
+            f"width={self.config.video_width},"
+            f"height={self.config.video_height}"
+        )
+        caps_filter2.set_property("caps", caps2)
+        # Add detection elements (placeholder - needs Hailo elements)
+        queue1 = Gst.ElementFactory.make("queue", "queue1")
+        # Tee for splitting stream
+        tee = Gst.ElementFactory.make("tee", "video_tee")
+        # Display branch
+        queue_display = Gst.ElementFactory.make("queue", "queue_display")
+        videoconvert_display = Gst.ElementFactory.make("videoconvert", "convert_display")
+        videosink = Gst.ElementFactory.make("autovideosink", "videosink")
+        # Add all elements
+        self.pipeline.add(videoconvert)
+        self.pipeline.add(videoscale)
+        self.pipeline.add(caps_filter2)
+        self.pipeline.add(queue1)
+        self.pipeline.add(tee)
+        self.pipeline.add(queue_display)
+        self.pipeline.add(videoconvert_display)
+        self.pipeline.add(videosink)
+        # Link pipeline
+        last_element.link(videoconvert)
+        videoconvert.link(videoscale)
+        videoscale.link(caps_filter2)
+        caps_filter2.link(queue1)
+        queue1.link(tee)
+        # Link display branch
+        tee.link(queue_display)
+        queue_display.link(videoconvert_display)
+        videoconvert_display.link(videosink)
+        # Add probe for detection callback on queue1's src pad
+        queue1_src_pad = queue1.get_static_pad("src")
+        queue1_src_pad.add_probe(
+            Gst.PadProbeType.BUFFER,
+            lambda pad, info: self.detection_callback(pad, info)
+        )
+        print("[PIPELINE] Pipeline created successfully")
+        # Set up bus to watch for messages
+        bus = self.pipeline.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", self.on_bus_message)
+        return self.pipeline
     
-    async def cleanup(self):
-        """Shutdown application and release resources"""
-        print("\n[APP] Shutting down application...")
-        self.is_running = False
-        self.camera.cleanup()
-        self.inference.cleanup()
-        print("[APP] Application terminated")
+    def on_bus_message(self, bus, message):
+        """Handle GStreamer bus messages"""
+        t = message.type
+        if t == Gst.MessageType.EOS:
+            print("[PIPELINE] End of stream")
+            if self.main_loop:
+                self.main_loop.quit()
+        elif t == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            print(f"[PIPELINE ERROR] {err}: {debug}")
+            if self.main_loop:
+                self.main_loop.quit()
+        elif t == Gst.MessageType.WARNING:
+            err, debug = message.parse_warning()
+            print(f"[PIPELINE WARNING] {err}: {debug}")
+        elif t == Gst.MessageType.STATE_CHANGED:
+            if message.src == self.pipeline:
+                old_state, new_state, pending_state = message.parse_state_changed()
+                print(f"[PIPELINE] State changed: {old_state.value_nick} -> {new_state.value_nick}")
+    
+    def start_pipeline(self):
+        """Start the GStreamer pipeline"""
+        if not self.pipeline:
+            self.create_pipeline()
+        print("[PIPELINE] Starting pipeline...")
+        ret = self.pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            print("[PIPELINE ERROR] Unable to set pipeline to PLAYING state")
+            return False
+        print("[PIPELINE] Pipeline is running")
+        return True
+    
+    def stop_pipeline(self):
+        """Stop the GStreamer pipeline"""
+        if self.pipeline:
+            print("[PIPELINE] Stopping pipeline...")
+            self.pipeline.set_state(Gst.State.NULL)
+            print("[PIPELINE] Pipeline stopped")
 
-#5: ENTRY POINT
-async def main():
-    """
-    Main entry point for the application.
-    """
-    app = TrafficDetectionApp()
-    try:
-        await app.initialize() # Initialize
-        await app.run() # Run main loop
-    except Exception as e:
-        print(f"[ERROR] Critical error: {e}")
-        import traceback
-        traceback.print_exc()
 
-#6: RUN APPLICATION
-if __name__ == "__main__": asyncio.run(main()) # Run async application
+# Main Application Class
+class CarTrackingApp:
+    """Main application class that coordinates all components"""
+    def __init__(self, config):
+        self.config = config
+        # Initialize components
+        self.websocket_server = WebSocketServer(config)
+        self.webrtc_server = WebRTCServer(config)
+        self.http_server = HTTPServer(config, self.webrtc_server)
+        self.detection_pipeline = DetectionPipeline(config, self.websocket_server)
+        # GStreamer app reference
+        self.gst_app = None
+        
+    async def setup_pipeline_callback(self, pad, info, user_data):
+        """Wrapper for detection callback"""
+        return self.detection_pipeline.detection_callback(pad, info)
+    
+    def initialize(self):
+        """Initialize all components"""
+        print("="*60)
+        print("CAR DETECTION AND TRACKING SYSTEM")
+        print("WITH IP CAMERA, WEBSOCKET, WebRTC & RTSP")
+        print("="*60)
+        # Print configuration
+        self.config.print_config()
+        # Start servers
+        self.websocket_server.start()
+        self.http_server.start()
+        print("[INIT] Initializing Hailo detection pipeline...")
+        
+    async def detection_loop(self):
+        """Async detection loop that processes frames"""
+        print("[PIPELINE] Starting async detection loop...")
+        # Start the async detection processor
+        processor_task = asyncio.create_task(self.detection_pipeline.process_detections_async())
+        try:
+            # Keep the loop running
+            while True:
+                await asyncio.sleep(1)
+                # Optional: Monitor queue size
+                queue_size = self.detection_pipeline.detection_queue.qsize()
+                if queue_size > 10:
+                    print(f"[WARNING] Detection queue backlog: {queue_size} items")
+        except asyncio.CancelledError:
+            print("[PIPELINE] Detection loop cancelled")
+            processor_task.cancel()
+            try:
+                await processor_task
+            except asyncio.CancelledError:
+                pass
+            raise
+
+    async def gstreamer_loop(self):
+        """Run GStreamer main loop in async context"""
+        print("[GSTREAMER] Starting GStreamer main loop...")
+        # Start the pipeline first
+        if not self.detection_pipeline.start_pipeline():
+            print("[ERROR] Failed to start pipeline")
+            return
+        def run_gst_loop():
+            """Run GLib main loop in a separate thread"""
+            self.detection_pipeline.main_loop = GLib.MainLoop()
+            self.detection_pipeline.main_loop.run()
+        # Start GLib main loop in thread
+        gst_thread = threading.Thread(target=run_gst_loop, daemon=True)
+        gst_thread.start()
+        try:
+            # Keep monitoring the pipeline
+            while True:
+                await asyncio.sleep(1)
+                # Check pipeline state
+                if self.detection_pipeline.pipeline:
+                    state = self.detection_pipeline.pipeline.get_state(0)
+                    if state[0] == Gst.StateChangeReturn.FAILURE:
+                        print("[ERROR] Pipeline state change failed")
+                        break
+        except asyncio.CancelledError:
+            print("[GSTREAMER] Main loop cancelled")
+            self.detection_pipeline.stop_pipeline()
+            if self.detection_pipeline.main_loop:
+                self.detection_pipeline.main_loop.quit()
+            raise
+    
+    async def async_run(self):
+        """Async run method for the application"""
+        print("\n[READY] Starting detection pipeline...")
+        print(f"[INFO] WebSocket: ws://localhost:{self.config.ws_port}")
+        print(f"[INFO] Web Interface: http://localhost:{self.config.http_port}")
+        print(f"[INFO] IP Camera: {self.config.ip_camera_url}")
+        print("[INFO] Press Ctrl+C to stop\n")
+        print("="*60)
+        # Create tasks for async operations
+        detection_task = asyncio.create_task(self.detection_loop())
+        gstreamer_task = asyncio.create_task(self.gstreamer_loop())
+        try:
+            # Wait for all tasks
+            await asyncio.gather(detection_task, gstreamer_task)
+        except asyncio.CancelledError:
+            print("\n[SHUTDOWN] Cancelling tasks...")
+            detection_task.cancel()
+            gstreamer_task.cancel()
+            try:
+                await asyncio.gather(detection_task, gstreamer_task)
+            except asyncio.CancelledError:
+                pass
+
+    def run(self):
+        """Run the application"""
+        self.initialize()
+        try:
+            # Run the async event loop
+            asyncio.run(self.async_run())
+        except KeyboardInterrupt:
+            print("\n\n[SHUTDOWN] Stopping detection...")
+            print(f"[STATS] Total frames processed: {self.detection_pipeline.frame_count}")
+            print(f"[STATS] Unique vehicles tracked: {len(self.detection_pipeline.detected_cars)}")
+            # Cleanup
+            self.webrtc_server.cleanup()
+            print("\nGoodbye!")
+        except Exception as e:
+            print(f"\n[ERROR] An error occurred: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+# Entry Point
+if __name__ == "__main__":
+    # Initialize GStreamer
+    Gst.init(None)
+    # Create configuration
+    config = DetectionConfig()
+    # Customize configuration here
+    config.ip_camera_url = 'rtsp://admin:Dcuk.123456@192.168.37.99:554/stream'
+    config.camera_type = 'ip'  # or 'rpicam'
+    config.debug_mode = True
+    config.confidence_threshold = 0.5
+    # Create and run application
+    app = CarTrackingApp(config)
+    app.run()
+
+"""
+GStreamer test
+gst-launch-1.0 \
+    rtspsrc location="rtsp://admin:Dcuk.123456@192.168.37.99/Stream" latency=0 ! \
+    rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! \
+    videoscale ! \
+    video/x-raw,format=RGB, width=640,height=640 ! \
+    hailonet hef-path=/home/imang/hailo-rpi5-examples/resources/models/hailo8/yolov8m.hef name=hailonet ! \
+    hailofilter function-name=yolov8 \
+        config-path=/home/imang/hailo_model_zoo/hailo_model_zoo/cfg/postprocess_config/yolov8m_nms_config.json \
+        name=hailofilter ! \
+    hailotracker kalman-dist-thr=0.7 iou-thr=0.3 keep-tracked-frames=30 keep-new-frames=3 keep-lost-frames=10 name=hailotracker ! \
+    hailooverlay show-confidence=true line-thickness=2 name=hailooverlay ! \
+    textoverlay text='Hailo Tracker - YOLOv8m' valignment=top halignment=left font-desc='Sans 12' ! \
+    autovideosink !
+"""

@@ -11,17 +11,16 @@ Cílem projektu je **vytvořit prototyp systému**, který dokáže v reálném 
 Systém bude implementován na **Raspberry Pi** s připojeným **AI akcelerátorem** (např. Google Coral USB Accelerator) a kamerou.
 
 ## Architektura systému
-
 ### Přehled komponent
 ```mermaid
 flowchart TD
     subgraph RPI[Raspberry Pi + AI Accelerator]
         CAM["Kamera (PiCam)"]
-        MODEL["AI model"]
-        DECISION["Rozhodovací logika"]
         SERVO["Servo / Motor"]
-        LOGGER["websocket"]
-        WEB["FatApi web server"]
+        MODEL["AI"]
+        DECISION["AI logic"]
+        LOGGER["WebSocket"]
+        WEB["FatApi server"]
     end
 
     CAM --> MODEL
@@ -92,29 +91,32 @@ flowchart TD
 ## Modulová struktura projektu
 ```
 project/
-├── ai_model/
-│   ├── train_model.ipynb        # Trénování modelu
-│   ├── model.tflite             # Optimalizovaný model
-│   └── dataset/                 # Data pro trénink
+├── AI/
+│   ├── AI_traffic_detection_hailo.py   # Zpracování a trackování objektů z kamery
+│   ├── model_export.py                 # Export modelu do ONNV formátu
+│   ├── yolov8m.hef                     # Optimalizovaný model
+│   └── pictures/                       # Obrázky pro lepší optimalizaci
 │
 ├── hardware/
-│   ├── servo_controller.py      # Ovládání motorů
-│   ├── camera_stream.py         # Práce s kamerou
-│   └── gpio_setup.py            # Nastavení GPIO pinů
+│   ├── ServoControl.py                 # Ovládání serv pomocí GPIO pinů
+│   ├── VideoStream.py                  # Práce s kamerou
+│   └── servo_test.py                   # test kamery
+│   └── camera_test.py                  # servo test
 │
-├── web/
-│   ├── app.py                   # Flask backend
-│   ├── static/                  # CSS, JS, grafy
-│   └── templates/               # HTML šablony
+├── CLIENT_API/
+│   ├── DatabaseManager.py              # Database management
+│   ├── client_API.py                   # FastApi client running on Raspberry
+│   └── snapshots/                      # Snapshots folder
 │
-├── data/
-│   ├── results.csv              # Log detekovaných objektů
-│   └── stats.db                 # Databáze výsledků
+├── web_dashboard/
+│   ├── app.py                          # Frontend dashboard 
+│   ├── static/                         # CSS, JS, grafy
+│   └── templates/                      # HTML šablony
 │
-└── docs/
-    ├── architecture_diagram.png # Architektura systému
-    └── README.md                # Dokumentace projektu
+└── data/
+    └── data.db                         # SQLite databáze uložených výsledků 
 ```
+
 
 ## Testování a evaluace
 - **Funkční testy** – klasifikace objektů v reálném čase.  
