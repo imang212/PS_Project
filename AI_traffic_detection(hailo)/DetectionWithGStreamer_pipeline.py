@@ -717,4 +717,19 @@ gst-launch-1.0 \
   textoverlay text='Hailo Tracker - YOLOv8m' valignment=top halignment=left font-desc='Sans 12' ! \
   videoconvert ! \
   autovideosink
+
+GStreamer test
+gst-launch-1.0 \
+    rtspsrc location="rtsp://admin:Dcuk.123456@192.168.37.99/Stream" latency=0 ! \
+    rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! \
+    videoscale ! \
+    video/x-raw,format=RGB, width=640,height=640 ! \
+    hailonet hef-path=/home/imang/hailo-rpi5-examples/resources/models/hailo8/yolov8m.hef name=hailonet ! \
+    hailofilter function-name=yolov8 \
+        config-path=/home/imang/hailo_model_zoo/hailo_model_zoo/cfg/postprocess_config/yolov8m_nms_config.json \
+        name=hailofilter ! \
+    hailotracker kalman-dist-thr=0.7 iou-thr=0.3 keep-tracked-frames=30 keep-new-frames=3 keep-lost-frames=10 name=hailotracker ! \
+    hailooverlay show-confidence=true line-thickness=2 name=hailooverlay ! \
+    textoverlay text='Hailo Tracker - YOLOv8m' valignment=top halignment=left font-desc='Sans 12' ! \
+    autovideosink !
 """
