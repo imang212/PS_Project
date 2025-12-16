@@ -2,9 +2,9 @@
 __pycache__/
 hailo_packages/
 fastapi_control_server/__pycache__
-Input/__pycache__
 tappas_3.31.0_linux_installer
-AI/yolo_files/yolov3.weights
+AI_detections_cv2/yolo_files/yolov3.weights
+AI(cv2_detection)/yolo_files/yolov3.weights
 AI_traffic_detection(ultralytics)/__pycache__
 AI_traffic_detection(ultralytics)/rpi-venv/
 AI_traffic_detection(hailo)/AI_traffic_detection_hailo.py

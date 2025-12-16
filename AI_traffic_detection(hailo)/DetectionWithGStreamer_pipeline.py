@@ -18,15 +18,16 @@ gi.require_version('GstRtspServer', '1.0')
 gi.require_version('GstWebRTC', '1.0')
 gi.require_version('GstSdp', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer, GstWebRTC, GstSdp
-import asyncio
 import json
 import threading
 import sys
 from datetime import datetime
 from MQTT import MQTTPublisher
-import websockets
+from WebRTCStreamer import WebRTCStreamer
+from WebSocket import WebSocketServerWithDetectionData
+from SimpleTracker import SimpleTracker
 try:
-    from hailo import get_roi_from_buffer, HAILO_DETECTION
+    from hailo import get_roi_from_buffer, HAILO_DETECTION, HAILO_UNIQUE_ID
 except ImportError as e:
     print(f"Error message: {e}") # The error message tells you exactly which .so version it's looking for
 
@@ -37,13 +38,14 @@ class DetectionData:
     """
     Stores detection and tracking data to be sent via WebSocket
     """
-    def __init__(self):
+    def __init__(self, debug=True):
         self.detections = []
         self.frame_count = 0
         self.timestamp = None
         self.lock = threading.Lock()
         self.last_sent_detections = None  # Track last sent data
         self.has_new_data = False  # Flag for new data
+        self.debug = debug
     
     def update(self, detections, frame_count):
         """
@@ -58,7 +60,7 @@ class DetectionData:
             self.timestamp = datetime.now().isoformat()
             self.has_new_data = True
             # Print detection summary every 60 frames
-            if self.frame_count % 60 == 0:
+            if self.debug == True and self.frame_count % 60 == 0:
                 self._print_summary()
     
     def _print_summary(self):
@@ -68,11 +70,10 @@ class DetectionData:
         print(f"\n[DETECTION SUMMARY Frame {self.frame_count}]")
         print(f"  Total detections: {len(self.detections)}")
         for idx, det in enumerate(self.detections):
-            bbox_tuple = (det['bbox']['x'], det['bbox']['y'], 
-                         det['bbox']['width'], det['bbox']['height'])
-            tracking_info = f"[ID:{det['tracking_id']}]" if det['tracking_id'] is not None else "[No ID]"
-            print(f"  [{idx}] {det['class']}: {det['confidence']:.2f} "
-                  f"@ bbox{bbox_tuple} {tracking_info}")
+            bbox_tuple = det['bbox']
+            tracking_info = f"[ID:{det['track_id']}]" if det['track_id'] is not None else "[No ID]"
+            print(f"  [{idx}] {det['class_name']}: {det['confidence']:.2f} "
+                  f"@ bbox{bbox_tuple} {tracking_info}, time: {det['timestamp']}")
     
     def get_json_if_new(self):
         """
@@ -111,149 +112,6 @@ class DetectionData:
         with self.lock:
             return {'timestamp': self.timestamp, 'frame_count': self.frame_count, 'detections': self.detections}
 
-class WebSocketServerWithDetectionData:
-    """
-    WebSocket server to send real-time detection data to clients
-    """
-    def __init__(self, detection_data, host="0.0.0.0", port=8765):
-        self.host = host
-        self.port = port
-        self.detection_data = detection_data
-        self.clients = set()
-        
-    async def handler(self, websocket):
-        """
-        Handles WebSocket client connections and sends detection data 
-        Args:
-            websocket: WebSocket connection object
-            path: Connection path
-        """
-        # Register new client
-        self.clients.add(websocket)
-        print(f"New WebSocket client connected from {websocket.remote_address}")
-        try:
-            # Send initial connection message
-            await websocket.send(json.dumps({
-                'type': 'connection',
-                'message': 'Connected to Hailo Tracker',
-                'timestamp': datetime.now().isoformat()
-            }))
-            # Continuously send detection data
-            while True:
-                # Get detection data only if it's new
-                data_json = self.detection_data.get_json_if_new()
-                # Send to client
-                if data_json is not None:
-                    # Send to WebSocket client
-                    await websocket.send(data_json)
-                    print(f"Sent detections at frame {self.detection_data.frame_count}")
-                # Check frequently but only send when there's new data
-                await asyncio.sleep(0.1)  # ~30 FPS check rate
-        except websockets.exceptions.ConnectionClosed:
-            print(f"Client {websocket.remote_address} disconnected")
-        finally:
-            # Unregister client
-            self.clients.remove(websocket)
-    
-    async def start_server(self):
-        """
-        Starts the WebSocket server
-        """
-        async with websockets.serve(self.handler, self.host, self.port):
-            print(f"WebSocket server running on ws://{self.host}:{self.port}")
-            await asyncio.Future()  # Run forever
-    
-    def run(self):
-        """
-        Runs the WebSocket server in an asyncio event loop
-        """
-        asyncio.run(self.start_server())
-
-class WebRTCStreamer:
-    """WebRTC streaming server using GStreamer webrtcbin"""
-    def __init__(self, signaling_server="ws://localhost:8443"):
-        self.signaling_server = signaling_server
-        self.webrtc_pipeline = None
-        self.webrtcbin = None
-        self.signaling_ws = None
-        
-    def create_webrtc_pipeline(self):
-        """
-        Creates a WebRTC streaming pipeline.
-        This pipeline receives video via appsrc and streams via WebRTC.
-        """
-        pipeline_str = (
-            "webrtcbin name=webrtc stun-server=stun://stun.l.google.com:19302 "
-            "appsrc name=webrtc_src format=time is-live=true "
-            "! videoconvert "
-            "! video/x-raw,format=I420 "
-            "! vp8enc deadline=1 target-bitrate=2000000 "
-            "! rtpvp8pay pt=96 "
-            "! webrtc. "
-        )
-        self.webrtc_pipeline = Gst.parse_launch(pipeline_str)
-        self.webrtcbin = self.webrtc_pipeline.get_by_name('webrtc')
-        # Connect WebRTC signals
-        self.webrtcbin.connect('on-negotiation-needed', self.on_negotiation_needed)
-        self.webrtcbin.connect('on-ice-candidate', self.on_ice_candidate)
-        return self.webrtc_pipeline
-    
-    def on_negotiation_needed(self, webrtcbin):
-        """Handle WebRTC negotiation"""
-        print("[WebRTC] Negotiation needed")
-        promise = Gst.Promise.new_with_change_func(self.on_offer_created, webrtcbin, None)
-        webrtcbin.emit('create-offer', None, promise)
-    
-    def on_offer_created(self, promise, webrtcbin, _):
-        """Handle offer creation"""
-        promise.wait()
-        reply = promise.get_reply()
-        offer = reply['offer']
-        promise = Gst.Promise.new()
-        webrtcbin.emit('set-local-description', offer, promise)
-        promise.interrupt()        
-        # Send offer to signaling server
-        self.send_sdp_offer(offer)
-    
-    def on_ice_candidate(self, webrtcbin, mlineindex, candidate):
-        """Handle ICE candidate"""
-        print(f"[WebRTC] ICE candidate: {candidate}")
-        # Send to signaling server
-        if self.signaling_ws:
-            asyncio.create_task(self.signaling_ws.send(json.dumps({
-                'type': 'ice',
-                'candidate': candidate,
-                'sdpMLineIndex': mlineindex
-            })))
-    
-    def send_sdp_offer(self, offer):
-        """Send SDP offer to signaling server"""
-        sdp = offer.sdp.as_text()
-        print(f"[WebRTC] Sending offer")
-        if self.signaling_ws:
-            asyncio.create_task(self.signaling_ws.send(json.dumps({
-                'type': 'offer',
-                'sdp': sdp
-            })))
-    
-    def set_remote_description(self, sdp_type, sdp_text):
-        """Set remote SDP description"""
-        ret, sdp = GstSdp.SDPMessage.new_from_text(sdp_text)
-        if ret != GstSdp.SDPResult.OK:
-            print("[WebRTC] Failed to parse SDP")
-            return
-        if sdp_type == 'answer':
-            answer = GstWebRTC.WebRTCSessionDescription.new(
-                GstWebRTC.WebRTCSDPType.ANSWER, sdp
-            )
-            promise = Gst.Promise.new()
-            self.webrtcbin.emit('set-remote-description', answer, promise)
-            promise.interrupt()
-    
-    def add_ice_candidate(self, mlineindex, candidate):
-        """Add ICE candidate"""
-        self.webrtcbin.emit('add-ice-candidate', mlineindex, candidate)
-
 class RTSPServer:
     """
     RTSP server to stream the processed video with detections and tracking
@@ -262,6 +120,7 @@ class RTSPServer:
         self.port = port
         self.mount_point = mount_point
         self.server = None
+        self.appsrc = None
         
     def create_server(self):
         """
@@ -277,17 +136,29 @@ class RTSPServer:
         # Define the RTSP pipeline
         # This pipeline receives video from our main pipeline via appsrc and streams it via RTSP with H.264 encoding
         factory.set_launch(
-            "( appsrc name=mysrc is-live=true format=time "
-            "! video/x-raw,format=I420,width=1536,height=864,framerate=30/1 "
+            "( appsrc name=mysrc is-live=true format=time do-timestamp=true "
+            "! video/x-raw,format=I420,width=640,height=640,framerate=30/1 "
+            "! videoconvert "
+            "! videoscale "
+            "! video/x-raw,width=1536,height=864 "
             "! x264enc tune=zerolatency bitrate=2000 speed-preset=ultrafast "
             "! rtph264pay name=pay0 pt=96 )"
         )
         # Allow multiple clients to connect
         factory.set_shared(True)
+        # Connect to media-configure signal to get appsrc
+        factory.connect("media-configure", self.on_media_configure)
         # Add the factory to the mount point
         mounts.add_factory(self.mount_point, factory)
         print(f"RTSP server ready at rtsp://localhost:{self.port}{self.mount_point}")
-        
+    
+    def on_media_configure(self, factory, media):
+        """Called when media is configured - get the appsrc element"""
+        element = media.get_element()
+        self.appsrc = element.get_child_by_name("mysrc")
+        if self.appsrc:
+            print("[INFO] RTSP appsrc configured")
+    
     def start(self):
         """
         Attaches the server to the main context
@@ -308,7 +179,8 @@ class HailoTrackerPipeline:
         self.enable_mqtt = enable_mqtt
         self.bus = None
         # Detection data storage
-        self.detection_data = DetectionData()
+        self.detection_data = DetectionData(debug=True)
+        self.db_manager = SQLiteDatabaseManager(db_path = "traffic_data.db")
         # RTSP server
         self.rtsp_server = None
         if enable_rtsp: self.rtsp_server = RTSPServer(port=8554, mount_point="/hailo_stream")
@@ -321,6 +193,8 @@ class HailoTrackerPipeline:
         # MQTT publisher
         self.mqtt_publisher = None
         if enable_mqtt: self.mqtt_publisher = MQTTPublisher(broker_host="mqtt.portabo.cz", broker_port=8883, topic="hailo/detections", client_id="hailo_tracker", username="videoanalyza", password="phdA9ZNW1vfkXdJkhhbP")
+        # Tracker
+        self.tracker = SimpleTracker(max_lost_frames=30, iou_threshold=0.5)
         # frame count
         self.frame_count = 0
 
@@ -352,7 +226,7 @@ class HailoTrackerPipeline:
             #"config-path=/home/imang/hailo_model_zoo/hailo_model_zoo/cfg/postprocess_config/yolov8m_nms_config.json "
             "so-path=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so "
             "! queue leaky=no max-size-buffers=30 max-size-bytes=0 max-size-time=0 " # Add queue after hailofilter
-            "! hailotracker kalman-dist-thr=0.7 iou-thr=0.5 keep-tracked-frames=30 keep-new-frames=3 keep-lost-frames=10 name=hailotracker "
+            #"! hailotracker keep-past-metadata=true kalman-dist-thr=0.7 iou-thr=0.8 keep-new-frames=2 keep-tracked-frames=30 keep-lost-frames=10 name=hailotracker "
             "! hailooverlay show-confidence=true line-thickness=2 name=hailooverlay "
             "! textoverlay text='Hailo Tracker - YOLOv8m' valignment=top halignment=left font-desc='Sans 12' "
             "! videoconvert "
@@ -363,11 +237,13 @@ class HailoTrackerPipeline:
             branches_added = False
             # RTSP branch
             if self.enable_rtsp:
+                self.rtsp_server.create_server()
+                self.rtsp_server.start()
                 pipeline_str += (
                     "t. "
                     "! queue leaky=downstream max-size-buffers=3 "
                     "! videoconvert "
-                    "! video/x-raw,format=I420,width=1536,height=864 "
+                    "! video/x-raw,format=I420,width=640,height=640 "  # Keep same resolution
                     "! appsink name=rtsp_sink emit-signals=true sync=false drop=true max-buffers=1 "
                  )
                 branches_added = True
@@ -377,10 +253,11 @@ class HailoTrackerPipeline:
                     "t. "
                     "! queue leaky=downstream max-size-buffers=3 "
                     "! videoconvert "
-                    "! video/x-raw,format=I420 "
-                    "! vp8enc deadline=1 target-bitrate=2000000 "
+                    "! video/x-raw,format=I420,width=640,height=640,framerate=30/1 "
+                    "! vp8enc deadline=1 target-bitrate=2000000 cpu-used=4 "
                     "! rtpvp8pay pt=96 "
-                    "! udpsink host=127.0.0.1 port=5001 sync=false async=false "
+                    "! application/x-rtp,media=video,encoding-name=VP8,payload=96 "
+                    "! webrtcbin name=webrtcbin stun-server=stun://stun.l.google.com:19302 "
                 )
                 branches_added = True    
             if not branches_added:
@@ -432,32 +309,32 @@ class HailoTrackerPipeline:
         current_timestamp = datetime.now().isoformat()
         # Process each detection
         for detection in hailo_detections:
-            
+            class_id = detection.get_class_id()
             label = detection.get_label()
             confidence = detection.get_confidence()
             bbox = detection.get_bbox()
+            bbox_coords = [
+                float(bbox.xmin()),
+                float(bbox.ymin()),
+                float(bbox.xmin() + bbox.width()),
+                float(bbox.ymin() + bbox.height())
+            ]
             # Get tracking ID if available
-            tracking_id = detection.get_class_id()
+            #tracking_id = 0
+            #track = detection.get_objects_typed(HAILO_UNIQUE_ID)
+            #if len(track) == 1: tracking_id = track[0].get_id()
             #if label in ["car", "motorcycle", "truck", "bus"] and confidence > 0.4:  # Threshold for valid detections
             #    label = detection.get_label()
             #    confidence = detection.get_confidence()
-            #    bbox = detection.get_bbox()
-            for det in roi.get_objects_typed(HAILO_DETECTION):
-                print(dir(det))
-                break  # print only once
-            
+            #    bbox = detection.get_bbox()          
             #Create detection dictionary
-            if confidence > 0.5:
+            if confidence > 0.6:
                 detection_dict = {
-                    'class': label,
+                    'class_id': class_id,
+                    'class_name': label,
                     'confidence': float(confidence),
-                    'bbox': {
-                        'x': float(bbox.xmin()),
-                        'y': float(bbox.ymin()), 
-                        'width': float(bbox.width()),
-                        'height': float(bbox.height())
-                    },
-                    'tracking_id': tracking_id if tracking_id is not None else None,
+                    'bbox': bbox_coords,
+                    #'tracking_id': tracking_id if tracking_id is not None else None,
                     'timestamp': current_timestamp
                 }
                 detection_list.append(detection_dict)
@@ -466,7 +343,51 @@ class HailoTrackerPipeline:
             #      f"width={bbox.width()}, height={bbox.height()}")
         self.frame_count += 1
         if self.frame_count % 30 == 0:
-            self.detection_data.update(detection_list, self.frame_count)
+            tracks = self.tracker.update(detection_list)
+            self.detection_data.update(tracks, self.frame_count)
+            ## TODO: CREATE saving tracked detections to db
+            ## Prepare batch detections for database
+            #db_detections = []
+            #track_ids_to_check = []
+            #for tracked_detection in self.detection_data:
+            #    track_id = tracked_detection.get('tracking_id', -1)
+            #    # Skip invalid track_ids
+            #    if track_id == -1 or track_id is None:
+            #        continue
+            #    track_ids_to_check.append(track_id)
+            #    # Create detection record for database
+            #    db_detection = {
+            #        'timestamp': current_timestamp,
+            #        'frame_id': self.frame_count,
+            #        'label': tracked_detection.get('class_name', 'unknown'),
+            #        'confidence': tracked_detection.get('confidence', 0.0),
+            #        'x1': int(tracked_detection.get('bbox', [0, 0, 0, 0])[0]),
+            #        'y1': int(tracked_detection.get('bbox', [0, 0, 0, 0])[1]),
+            #        'x2': int(tracked_detection.get('bbox', [0, 0, 0, 0])[2]),
+            #        'y2': int(tracked_detection.get('bbox', [0, 0, 0, 0])[3]),
+            #        'track_id': track_id,
+            #        'total_count': len(self.detection_data)
+            #    }
+            #    db_detections.append(db_detection)
+            ## Check which track_ids already exist in database (batch check for efficiency)
+            #if db_detections and hasattr(self, 'db_manager'):
+            #    try:
+            #        existing_track_ids = self.db_manager.get_existing_track_ids(track_ids_to_check)
+            #        # Filter out detections with existing track_ids
+            #        new_detections = [
+            #            det for det in db_detections 
+            #            if det['track_id'] not in existing_track_ids
+            #        ]
+            #        # Insert only new detections
+            #        if new_detections:
+            #            self.db_manager.insert_batch_detections(new_detections)
+            #            print(f"[Database] Inserted {len(new_detections)} new detections at frame {self.frame_count}")
+            #            print(f"[Database] Skipped {len(db_detections) - len(new_detections)} detections with existing track_ids")
+            #        else:
+            #            print(f"[Database] All {len(db_detections)} track_ids already exist, skipped insertion")
+            #    except Exception as e:
+            #        print(f"[Database] Error inserting detections: {e}")        
+
         # Publish to MQTT
         if self.enable_mqtt and self.mqtt_publisher and self.mqtt_publisher.connected:
             if self.frame_count % 30 == 0:  # Publish every 10 frames to reduce load
@@ -489,6 +410,21 @@ class HailoTrackerPipeline:
             if message.src == self.pipeline:
                 old_state, new_state, pending_state = message.parse_state_changed(); print(f"[Pipeline] Pipeline state: {old_state.value_nick} -> {new_state.value_nick}")
     
+    def on_new_sample_rtsp(self, appsink):
+        """Callback for appsink - pushes buffers to RTSP server"""
+        try:
+            sample = appsink.emit("pull-sample")
+            if sample and self.rtsp_server and self.rtsp_server.appsrc:
+                # Push the buffer to RTSP appsrc
+                buffer = sample.get_buffer()
+                ret = self.rtsp_server.appsrc.emit("push-buffer", buffer)
+                if ret != Gst.FlowReturn.OK:
+                    print(f"[WARNING] RTSP push-buffer returned: {ret}")
+            return Gst.FlowReturn.OK
+        except Exception as e:
+            print(f"[ERROR] RTSP sample callback error: {e}")
+            return Gst.FlowReturn.ERROR
+    
     def start(self):
         """
         Starts the pipeline, RTSP server, and WebSocket server
@@ -496,15 +432,23 @@ class HailoTrackerPipeline:
         print("[pipeline] Starting Hailo Tracker Pipeline...")
         if self.enable_mqtt and self.mqtt_publisher:
             self.mqtt_publisher.connect()
+
         if self.enable_rtsp and self.rtsp_server:
-            self.rtsp_server.create_server()
-            self.rtsp_server.start()
+            rtsp_sink = self.pipeline.get_by_name('rtsp_sink')
+            if rtsp_sink:
+                rtsp_sink.connect("new-sample", self.on_new_sample_rtsp)
+                print("[INFO] RTSP sink connected")
+        
         if self.enable_websocket and self.websocket_server:
             ws_thread = threading.Thread(target=self.websocket_server.run, daemon=True)
             ws_thread.start()
+        
         if self.enable_webrtc and self.webrtc_streamer:
-            print("[WebRTC] Note: Requires separate signaling server")
-            print("WebSocket server started")
+            # Start signaling after pipeline is ready
+            self.webrtc_streamer.create_webrtc_pipeline(self.pipeline)
+            self.webrtc_streamer.start_signaling("hailo-stream")
+            print("[INFO] WebRTC signalling started")
+            
         # Set pipeline to PLAYING state
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
@@ -565,7 +509,7 @@ def main():
     print(f"GStreamer version: {Gst.version_string()}")
     print() 
     # Create and start the pipeline with all features enabled
-    tracker = HailoTrackerPipeline(enable_rtsp=False, enable_websocket=True, enable_webrtc=False, enable_mqtt=False)
+    tracker = HailoTrackerPipeline(enable_rtsp=True, enable_websocket=False, enable_webrtc=False, enable_mqtt=False)
     tracker.create_pipeline()
     tracker.start()
     return 0
@@ -649,7 +593,7 @@ Then connect to:
 - RTSP: rtsp://raspberry-pi-ip:8554/hailo_stream
 - WebSocket: ws://raspberry-pi-ip:8765
 
-GStreamer testing command:
+GStreamer console testing commands:
 gst-launch-1.0 \
   libcamerasrc ! \
   video/x-raw,format=NV12,width=1536,height=864,framerate=30/1 ! \
@@ -732,4 +676,9 @@ gst-launch-1.0 \
     hailooverlay show-confidence=true line-thickness=2 name=hailooverlay ! \
     textoverlay text='Hailo Tracker - YOLOv8m' valignment=top halignment=left font-desc='Sans 12' ! \
     autovideosink !
+
+Launch RSTP stream from camera:
+gst-launch-1.0 -v rtspsrc location=rtsp://192.168.37.205:8554/hailo_stream latency=0 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink
+Launch real stream from camera:
+gst-launch-1.0 rtspsrc location="rtsp://admin:Dcuk.123456@192.168.37.99/Streaming/Channels" latency=0 !   rtph264depay ! h264parse ! avdec_h264 ! vid
 """

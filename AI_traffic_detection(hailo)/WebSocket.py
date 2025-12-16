@@ -127,6 +127,65 @@ class WebSocketServer:
         """
         asyncio.run(self.start_server())
 
+class WebSocketServerWithDetectionData:
+    """
+    WebSocket server to sending real-time detection data to clients from class with detection data
+    """
+    def __init__(self, detection_data, host="0.0.0.0", port=8765):
+        self.host = host
+        self.port = port
+        self.detection_data = detection_data
+        self.clients = set()
+        self.server = None
+        
+    async def handler(self, websocket):
+        """
+        Handles WebSocket client connections and sends detection data 
+        Args:
+            websocket: WebSocket connection object
+            path: Connection path
+        """
+        # Register new client
+        self.clients.add(websocket)
+        print(f"New WebSocket client connected from {websocket.remote_address}")
+        try:
+            # Send initial connection message
+            await websocket.send(json.dumps({
+                'type': 'connection',
+                'message': 'Connected to Hailo Tracker',
+                'timestamp': datetime.now().isoformat()
+            }))
+            # Continuously send detection data
+            while True:
+                # Get detection data only if it's new
+                data_json = self.detection_data.get_json_if_new()
+                # Send to client
+                if data_json is not None:
+                    # Send to WebSocket client
+                    await websocket.send(data_json)
+                    print(f"Sent detections at frame {self.detection_data.frame_count}")
+                # Check frequently but only send when there's new data
+                await asyncio.sleep(0.1)  # ~30 FPS check rate
+        except websockets.exceptions.ConnectionClosed:
+            print(f"Client {websocket.remote_address} disconnected")
+        finally:
+            # Unregister client
+            self.clients.remove(websocket)
+    
+    async def start_server(self):
+        """
+        Starts the WebSocket server
+        """
+        async with websockets.serve(self.handler, self.host, self.port):
+            print(f"WebSocket server running on ws://{self.host}:{self.port}")
+            await asyncio.Future()  # Run forever
+    
+    def run(self):
+        """
+        Runs the WebSocket server in an asyncio event loop
+        """
+        asyncio.run(self.start_server())
+
 class WebSocketServerWithDebug:
     """
     WebSocket server for real-time detection streaming for version 15.0.1.

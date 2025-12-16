@@ -11,7 +11,7 @@ from time import sleep
 from contextlib import asynccontextmanager
 import subprocess
 
-from yoloTrafficDetectionSystem import TrafficMonitoringPipeline
+from DetectionWithGStreamer_pipeline import HailoTrackerPipeline
 from ServoControl import ContinuousServo
 
 ## MODELS
@@ -48,7 +48,7 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 # Global pipeline instance for AI process
-pipeline: Optional[TrafficMonitoringPipeline] = None
+pipeline: Optional[HailoTrackerPipeline] = None
 
 # INITIALIZE SERVO/S A MONITORING PIPELINE ON STARTUP AND STOP ON SHUTDOWN
 @asynccontextmanager
@@ -63,9 +63,10 @@ async def lifespan(app: FastAPI):
     global servo_L
     # Startup
     print("[FastAPI] Starting up...")
-    pipeline = TrafficMonitoringPipeline(model_path="yolo11n.pt", video_source=0, db_path="traffic_data.db", resolution=(1536, 864), fps=15)
+    pipeline = HailoTrackerPipeline(model_path="yolo11n.pt", video_source=0, db_path="traffic_data.db", resolution=(1536, 864), fps=15)
     servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
     # Start pipeline in background
+    asyncio.create_task(pipeline.create_pipeline())
     asyncio.create_task(pipeline.start()) 
     yield
     # Shutdown
