@@ -170,7 +170,7 @@ class HailoTrackerPipeline:
     """
     Main class for managing the GStreamer pipeline with Hailo detection and tracking.
     """
-    def __init__(self, enable_rtsp=True, enable_websocket=True, enable_webrtc=True, enable_mqtt=True, enable_display=True):
+    def __init__(self, enable_rtsp=True, enable_websocket=True, enable_webrtc=False, enable_mqtt=True, enable_debug=True):
         self.pipeline = None
         self.loop = None
         self.enable_rtsp = enable_rtsp
@@ -179,8 +179,7 @@ class HailoTrackerPipeline:
         self.enable_mqtt = enable_mqtt
         self.bus = None
         # Detection data storage
-        self.detection_data = DetectionData(debug=True)
-        self.db_manager = SQLiteDatabaseManager(db_path = "traffic_data.db")
+        self.detection_data = DetectionData(debug=enable_debug)
         # RTSP server
         self.rtsp_server = None
         if enable_rtsp: self.rtsp_server = RTSPServer(port=8554, mount_point="/hailo_stream")

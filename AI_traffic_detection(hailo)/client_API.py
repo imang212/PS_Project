@@ -63,11 +63,11 @@ async def lifespan(app: FastAPI):
     global servo_L
     # Startup
     print("[FastAPI] Starting up...")
-    pipeline = HailoTrackerPipeline(model_path="yolo11n.pt", video_source=0, db_path="traffic_data.db", resolution=(1536, 864), fps=15)
+    pipeline = HailoTrackerPipeline(enable_rtsp=True, enable_websocket=False, enable_webrtc=False, enable_mqtt=False, enable_debug=False)
     servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
     # Start pipeline in background
-    asyncio.create_task(pipeline.create_pipeline())
-    asyncio.create_task(pipeline.start()) 
+    pipeline.create_pipeline()
+    pipeline.start() 
     yield
     # Shutdown
     print("[FastAPI] Shutting down...")
