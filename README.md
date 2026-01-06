@@ -68,8 +68,7 @@ PS_Project/
 │
 ├── .gitignore                    # Git ignore rules
 ├── LICENSE                       # Project license
-└── README.md                     # Project readme in english               
-test script
+└── README.md                     # Project readme (English)             
 ```
 
 ## Team Roles

@@ -11,8 +11,9 @@ from time import sleep
 from contextlib import asynccontextmanager
 import subprocess
 
-from yoloTrafficDetectionSystem import TrafficMonitoringPipeline
-from ServoControl import ContinuousServo
+from ..pipeline.HailoPipeline import HailoPipeline
+from ..pipeline.HailoPipeline import MQTTListener
+from ..hardware.ServoControl import ContinuousServo
 
 ## MODELS
 # Servo control request
@@ -48,29 +49,23 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 # Global pipeline instance for AI process
-pipeline: Optional[TrafficMonitoringPipeline] = None
+pipeline: Optional[HailoPipeline] = None
 
-# INITIALIZE SERVO/S A MONITORING PIPELINE ON STARTUP AND STOP ON SHUTDOWN
+# INITIALIZE SERVO/S ON STARTUP AND STOP ON SHUTDOWN
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan context manager.
     Handles startup and shutdown services.
-    - Startup: Initialize and start pipeline in background task
-    - Shutdown: Stop pipeline and cleanup resources
+    ️ Initializes servo controller and AI pipeline on startup.
     """
-    global pipeline
     global servo_L
     # Startup
     print("[FastAPI] Starting up...")
-    pipeline = TrafficMonitoringPipeline(model_path="yolo11n.pt", video_source=0, db_path="traffic_data.db", resolution=(1536, 864), fps=15)
     servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
-    # Start pipeline in background
-    asyncio.create_task(pipeline.start()) 
     yield
     # Shutdown
     print("[FastAPI] Shutting down...")
-    if pipeline: pipeline.stop()
     if servo_L: servo_L.cleanup()
 
 # Initialize FastAPI app
@@ -135,7 +130,7 @@ async def get_detections(minutes: int = 5, limit: int = 100):
     """
     if pipeline is None: raise HTTPException(status_code=503, detail="Pipeline not initialized")
     
-    detections = pipeline.db.get_recent_detections(minutes, limit)
+    detections = MQTTListener.get_recent_detections(minutes, limit)
     return [
         DetectionResponse(
             timestamp=d['timestamp'],
@@ -166,7 +161,7 @@ async def get_statistics(hours: int = 1):
         {"car": {"count": 150, "avg_confidence": 0.92}, "truck": {"count": 23, "avg_confidence": 0.88}, "person": {"count": 45, "avg_confidence": 0.85}}
     """
     if pipeline is None: raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    stats = pipeline.db.get_statistics(hours)
+    stats = MQTTListener.get_statistics(hours)
     return {
         label: StatisticsResponse(
             label=label,
@@ -216,57 +211,11 @@ async def create_bulk_detections(detections: List[Dict[str, Any]]):
     [{"timestamp": "2024-11-20T10:30:00","frame_id": 0,"label": "car","confidence": 0.95, "x1": 100, "y1": 100, "x2": 200, "y2": 200, "track_id": 1, "total_count": 1}]
     """
     if pipeline is None: raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    pipeline.db.insert_batch_detections(detections)
+    MQTTListener.insert_batch_detections(detections)
     return {
         "message": "Detections inserted successfully",
         "count": len(detections)
     }
-
-# WEBSOCKET ENDPOINT FOR REAL-TIME STREAMING
-@app.websocket("/ws/ai")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time detection streaming.
-    Protocol:
-    1. Client connects to ws://server:8000/ws
-    2. Server accepts connection
-    3. Server continuously sends detection data as JSON
-    4. Client receives updates in real-time
-    Usage (JavaScript):
-    ```javascript
-    const ws = new WebSocket('ws://localhost:8000/ws');
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        console.log('Detections:', data.detections);
-        console.log('Statistics:', data.statistics);
-    };
-    ```
-    Args:
-        websocket: FastAPI WebSocket connection
-    """
-    if pipeline is None:
-        await websocket.close(code=1011, reason="Pipeline not initialized")
-        return
-    # Accept and register connection
-    await pipeline.ws_manager.connect(websocket)
-    try:
-        # Keep connection alive and handle incoming messages
-        while True:
-            # Wait for messages from client (e.g., commands, config changes)
-            data = await websocket.receive_text()
-            # Echo back or process commands
-            # For now, just acknowledge
-            await websocket.send_json({
-                "type": "ack",
-                "message": "Message received",
-                "data": data
-            })
-    except WebSocketDisconnect:
-        # Client disconnected
-        pipeline.ws_manager.disconnect(websocket)
-    except Exception as e:
-        print(f"[WebSocket] Error: {e}")
-        pipeline.ws_manager.disconnect(websocket)
 
 # ENDPOINT FOR WEBSOCKET TESTING
 @app.get("/test-ws", response_class=HTMLResponse)
@@ -317,40 +266,6 @@ async def test_websocket_page():
     </html>
     """
     return HTMLResponse(content=html)
-
-# MJPEG VIDEO AI STREAM ENDPOINT
-@app.get("/stream/ai")
-async def video_stream():
-    """
-    MJPEG video stream endpoint.
-    Streams annotated video frames as Motion JPEG.
-    Can be viewed directly in browser or embedded in <img> tag.
-    Usage:
-    <img src="http://localhost:8000/stream" />
-    Returns: StreamingResponse with MJPEG video
-    Note: This is more resource-intensive than WebSocket.
-    Use WebSocket for detection data and render on frontend instead.
-    """
-    from fastapi.responses import StreamingResponse
-    import cv2
-    if pipeline is None: raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    async def generate_frames():
-        """Generate MJPEG frames."""
-        while True:
-            frame = pipeline.get_annotated_frame()
-            if frame is None:
-                await asyncio.sleep(0.01)
-                continue
-            # Encode frame as JPEG
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if not ret:
-                continue
-            frame_bytes = buffer.tobytes()
-            # Yield frame in MJPEG format
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            await asyncio.sleep(1.0 / pipeline.fps)
-    return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 ## CAMERA ENDPOINTS
 # CAMERA CAPTURE (PHOTO)
@@ -508,20 +423,22 @@ def root():
         "version": "1.0.0",
         "endpoints": {
             "camera": {
-                "capture": "POST /camera/capture",
-                "stream": "GET /camera/stream",
+                "capture": "POST /camera/stream/capture",
+                "stream": "GET /camera/stream/snapshots",
+                "viewer": "GET /camera/stream/hls",
             },
             "utility": {
                 "list_captures": "GET /captures",
                 "delete_capture": "DELETE /captures/{filename}",
-                "health": "GET /health",
+                "health": "GET /health/camera",
+                "servo_move": "POST /servo/move",
             },
             "AI_traffic_detection": {
                 "health": "/health/ai",
                 "detections": "/api/detections",
                 "statistics": "/api/statistics",
-                "websocket": "/ws/ai",
-                "video_stream": "/stream/ai"
+                "bulk_insert": "/api/detections/bulk",
+                "current_state": "/api/current/ai",
             }
         }
     }
