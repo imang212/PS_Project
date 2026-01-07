@@ -268,27 +268,3 @@ class MQTTListener(HailoListener):
         self.client.loop_stop()
         self.client.disconnect()
         logger.info("MQTT Listener disconnected.")
-
-if __name__ == "__main__":
-    # --- Configuration ---
-    URL = "rtsp://192.168.0.105:8080/h264_ulaw.sdp"
-    VIDEO_OUT = "/home/nightshadearia/output_boxed.mkv"
-    JSON_OUT = "/home/nightshadearia/detections.json"
-    HEF_PATH = "/home/nightshadearia/hailo-rpi5-examples/resources/yolov8n.hef"
-    POST_SO = "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so"
-
-    src = RTSPSource(URL)
-    inf = HailoInference(HEF_PATH, POST_SO)
-    
-    # Create the listener that handles the saving logic
-    save_listener = MQTTListener()
-    
-    # Pass the listener directly to the pipeline
-    pipeline = HailoPipeline(src, LetterboxAdapter(), inf, save_listener)
-    
-    # Run for 10 seconds
-    GLib.timeout_add_seconds(10, lambda: (pipeline.stop(), False)[1])
-    pipeline.run()
-
-
-
