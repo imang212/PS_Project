@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -11,8 +11,8 @@ from time import sleep
 from contextlib import asynccontextmanager
 import subprocess
 
-from ..pipeline.HailoPipeline import HailoPipeline
-from ..pipeline.HailoPipeline import MQTTListener
+from ..Pipeline.HailoPipeline import HailoPipeline
+from ..Pipeline.HailoPipeline import MQTTListener
 from ..hardware.ServoControl import ContinuousServo
 
 ## MODELS
@@ -106,7 +106,7 @@ async def health_check():
     """
     if pipeline is None: raise HTTPException(status_code=503, detail="Pipeline not initialized")
     return HealthResponse(
-        status="running" if pipeline.running else "stopped",
+        status="running" if pipeline else "stopped",
         fps=pipeline.fps_actual,
         total_tracked=pipeline.counter.get_total_count(),
         timestamp=datetime.now().isoformat()

@@ -24,6 +24,7 @@ import io
 from starlette.responses import StreamingResponse
 from collections import deque
 from datetime import datetime
+from api_integration import get_api_integration
 
 # --- Dependency Management ---
 
@@ -376,6 +377,9 @@ class DashboardLayout:
                 
                 ui.button('GPIO Control', icon='settings_input_component', on_click=lambda: ui.navigate.to('/gpio')) \
                     .props(btn_props).classes(btn_classes)
+
+                ui.button('API Navigator', icon='api', on_click=lambda: ui.navigate.to('/api-control')) \
+                    .props(btn_props).classes(btn_classes + ' text-emerald-400')
             
             # --- Bottom Section: System Utilities ---
             with ui.column().classes('w-full pb-4 gap-0'):
@@ -1531,6 +1535,122 @@ class MQTTInspector:
         self.messages.clear()
         self.msg_container.clear()
 
+class APINavigator:
+    """
+    Comprehensive API control interface with live status monitoring
+    """
+    def __init__(self, api_integration):
+        self.api = api_integration
+        self.status_timer = None
+        self.build()
+        
+    def build(self):
+        with ui.column().classes('w-full h-[calc(100vh-50px)] bg-[#050a0f] p-6 gap-6 overflow-y-auto'):
+            # Header
+            with ui.row().classes('w-full items-center justify-between mb-4'):
+                with ui.row().classes('items-center gap-3'):
+                    ui.icon('api', color='emerald-400').classes('text-3xl')
+                    ui.label('API NAVIGATOR').classes('text-emerald-400 text-xl font-black tracking-widest')
+                ui.button('REFRESH STATUS', icon='refresh', on_click=self.refresh_all_status) \
+                    .props('flat color=blue-400')
+            # Status Overview Card
+            with ui.card().classes('bg-[#0a192f] border border-blue-900 p-4 w-full'):
+                ui.label('SYSTEM STATUS').classes('text-blue-300 font-bold text-sm mb-3')
+                with ui.row().classes('w-full gap-4'):
+                    # Pipeline Status
+                    with ui.column().classes('gap-1'):
+                        ui.label('AI Pipeline').classes('text-[10px] text-gray-500 uppercase')
+                        self.pipeline_status = ui.label('Checking...').classes('text-emerald-400 font-mono text-sm')
+                    # FPS Counter
+                    with ui.column().classes('gap-1'):
+                        ui.label('FPS').classes('text-[10px] text-gray-500 uppercase')
+                        self.fps_label = ui.label('--').classes('text-amber-400 font-mono text-sm')
+                    # Object Count
+                    with ui.column().classes('gap-1'):
+                        ui.label('Tracked Objects').classes('text-[10px] text-gray-500 uppercase')
+                        self.count_label = ui.label('--').classes('text-blue-400 font-mono text-sm')
+            # Servo Control Section
+            with ui.card().classes('bg-[#0a192f] border border-emerald-900 p-4 w-full'):
+                ui.label('SERVO CONTROL').classes('text-emerald-300 font-bold text-sm mb-3')
+                with ui.row().classes('w-full gap-4 items-end'):
+                    self.angle_input = ui.number('Angle (degrees)', value=0, min=-180, max=180) \
+                        .props('dark outlined dense').classes('grow')
+                    self.speed_input = ui.number('Speed (%)', value=50, min=0, max=100) \
+                        .props('dark outlined dense').classes('w-32')
+                    ui.button('MOVE', icon='rotate_right', on_click=self.move_servo) \
+                        .props('color=emerald-9').classes('px-6')
+                # Quick Angle Presets
+                with ui.row().classes('w-full gap-2 mt-2'):
+                    ui.label('Quick Angles:').classes('text-xs text-gray-500 mr-2')
+                    for angle in [-90, -45, 0, 45, 90]:
+                        ui.button(f'{angle}°', on_click=lambda a=angle: self.quick_angle(a)) \
+                            .props('flat dense size=sm color=blue-400')
+            # Camera Stream Section
+            with ui.card().classes('bg-[#0a192f] border border-blue-900 p-4 w-full'):
+                ui.label('CAMERA STREAM').classes('text-blue-300 font-bold text-sm mb-3')
+                with ui.row().classes('w-full gap-4'):
+                    ui.button('Open HLS Stream', icon='videocam', on_click=lambda: ui.navigate.to('/camera/stream/hls', new_tab=True)) \
+                        .props('color=blue-9').classes('grow')
+                    ui.button('Open Raw Stream', icon='video_library', on_click=lambda: ui.navigate.to('/camera/stream/raw', new_tab=True)) \
+                        .props('flat color=blue-400').classes('grow')
+            # API Endpoints Reference
+            with ui.card().classes('bg-[#0a192f] border border-gray-800 p-4 w-full'):
+                ui.label('API ENDPOINTS').classes('text-gray-400 font-bold text-sm mb-3')
+                endpoints = [
+                    {'method': 'POST', 'path': '/api/servo/rotate', 'desc': 'Rotate servo to angle'},
+                    {'method': 'GET', 'path': '/api/pipeline/status', 'desc': 'Get AI pipeline status'},
+                    {'method': 'GET', 'path': '/api/camera/stream', 'desc': 'Camera video stream'},
+                    {'method': 'POST', 'path': '/api/pipeline/start', 'desc': 'Start AI processing'},
+                    {'method': 'POST', 'path': '/api/pipeline/stop', 'desc': 'Stop AI processing'},
+                ]
+                for ep in endpoints:
+                    with ui.row().classes('w-full items-center gap-3 py-2 border-b border-gray-800/50 hover:bg-white/5 font-mono'):
+                        ui.badge(ep['method'], color='emerald' if ep['method'] == 'GET' else 'amber') \
+                            .props('rounded').classes('text-[9px] w-14')
+                        ui.label(ep['path']).classes('text-blue-400 text-xs grow')
+                        ui.label(ep['desc']).classes('text-gray-500 text-[10px]')
+            # Log Output
+            with ui.card().classes('bg-black border border-gray-900 p-0 w-full'):
+                with ui.row().classes('w-full items-center justify-between bg-[#0d1b2a] px-4 py-2 border-b border-gray-900'):
+                    ui.label('API LOG').classes('text-gray-400 font-mono text-xs font-bold')
+                    ui.button(icon='delete_sweep', on_click=lambda: self.log_area.clear()) \
+                        .props('flat dense size=sm color=gray-500')
+                self.log_area = ui.log().classes('w-full h-48 text-emerald-400 font-mono text-[11px] bg-black')
+        # Start auto-refresh timer
+        self.status_timer = ui.timer(2.0, self.refresh_all_status)
+
+    async def move_servo(self):
+        try:
+            angle = int(self.angle_input.value)
+            speed = int(self.speed_input.value)
+            self.log_area.push(f'> Moving servo to {angle}° at {speed}% speed...')
+            result = await self.api.servo.rotate_degrees(angle, speed)
+            self.log_area.push(f'✓ Servo moved successfully')
+            ui.notify(f'Servo moved to {angle}°', color='positive')
+        except Exception as e:
+            self.log_area.push(f'✗ Error: {str(e)}')
+            ui.notify(f'Error: {str(e)}', color='negative')
+
+    def quick_angle(self, angle):
+        self.angle_input.value = angle
+        
+    async def refresh_all_status(self):
+        try:
+            if self.api.pipeline:
+                fps = self.api.pipeline.fps_actual
+                total = self.api.pipeline.counter.get_total_count()        
+                self.pipeline_status.text = 'ACTIVE'
+                self.pipeline_status.classes('text-emerald-400')
+                self.fps_label.text = f'{fps:.1f}'
+                self.count_label.text = str(total)
+            else:
+                self.pipeline_status.text = 'INACTIVE'
+                self.pipeline_status.classes('text-red-400')
+                self.fps_label.text = '--'
+                self.count_label.text = '--'
+        except Exception as e:
+            self.log_area.push(f'Status check error: {str(e)}')
+        
 class GPIOPage:
     def __init__(self):
         self.refresh_timer = None
@@ -1718,9 +1838,10 @@ class SystemWatchdog(threading.Thread):
             return r.status_code == 200 and isinstance(r.json(), dict)
         except Exception:
             return False
-        
+
 class PiManagerApp:
     def __init__(self):
+        self.api = get_api_integration()
         self.setup_routes()
         self.args = self._parse_args()
 
@@ -1810,7 +1931,15 @@ class PiManagerApp:
             else:
                 DashboardLayout()
                 GPIOPage()
-
+        
+        @ui.page('/api-control')
+        def api_control_page():
+            if not app.storage.user.get('authenticated', False):
+                ui.navigate.to('/')
+            else:
+                DashboardLayout()
+                APIControlPanel(self.api)
+        
     def show_login(self):
         with ui.column().classes('w-full h-screen items-center justify-center bg-[#050a0f]'):
             with ui.card().classes('shadow-24 q-pa-lg border border-blue-900').style('background-color: #0a192f; width: 360px'):
