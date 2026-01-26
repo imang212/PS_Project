@@ -72,7 +72,7 @@ PS_Project/
 ```
 
 ## Team Roles
-### 1. AI / Computer Vision Engineer
+### 1. AI / Computer Vision 
 **Responsibilities:**
 - Research detection and classification methods
 - Collect and prepare datasets (object photos, annotations)
@@ -82,7 +82,7 @@ PS_Project/
 **Technologies:**
 - Python, PiCamera2, ONNX + Hailo, YOLOv8
 
-### 2. Embedded & Hardware Engineer
+### 2. Embedded & Hardware
 **Responsibilities:**
 - Configure Raspberry Pi (OS, camera, GPIO)
 - Connect and program servo motors, sensors, and camera
@@ -92,7 +92,7 @@ PS_Project/
 **Technologies:**
 - Python (lgpio), Raspberry Pi OS, rpicam, Bash / Docker
 
-### 3. Software & Data Visualization Developer
+### 3. Software & Data Visualization 
 **Responsibilities:**
 - Develop web interface (HTML/CSS/JavaScript)
 - Implement REST API for classification results
@@ -126,7 +126,7 @@ PS_Project/
 | Embedded    | Raspberry Pi 5, GPIO (lgpio), IMX708 camera |
 | Backend     | FastAPI, Python                           |
 | Frontend    | HTML, CSS, JavaScript                     |
-| Database    | SQLite / PostgreSQL                       |
+| Database    | PostgreSQL                                |
 | Other       | Git, Docker, Markdown, MQTT               |
 
 ## Development Timeline (Overview)
@@ -154,8 +154,8 @@ PS_Project/
 ## Project Team
 | Name     | Role                | Responsibility                        |
 |----------|---------------------|---------------------------------------|
-| Member 1 | AI Engineer         | Model development and data analysis   |
-| Member 2 | Embedded Developer  | Raspberry Pi, servo, camera          |
+| Member 1 | AI developer        | Model development and data analysis   |
+| Member 2 | Embedded Developer  | Raspberry Pi, servo, camera           |
 | Member 3 | Software Developer  | Web, API, visualization, documentation |
 
 ## Contributing
