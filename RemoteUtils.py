@@ -586,7 +586,7 @@ class RemoteController:
             c.put(__file__, self.remote_path)
             service = (
                 f"[Unit]\nDescription=NiceGUI Manager\nAfter=network.target\n\n"
-                f"[Service]\nExecStart=/usr/bin/python3 {self.remote_path} --gui\n"
+                f"[Service]\nExecStart=/home/imang/venv/bin/python {self.remote_path} --gui\n"
                 f"Restart=always\nUser={self.user}\nWorkingDirectory=/home/{self.user}\n\n"
                 f"[Install]\nWantedBy=multi-user.target"
             )
@@ -2896,7 +2896,7 @@ class PiManagerApp:
                 dark=True, 
                 reload=False, 
                 storage_secret='midnight_blue_heartbeat_secret',
-                on_air="wgzVuSHfPgBd67V6"
+                on_air="dJ8RUiKa7vRAHEjx"
             )
 
 # --- Entry Point ---
