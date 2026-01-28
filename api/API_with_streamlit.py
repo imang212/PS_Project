@@ -2,26 +2,21 @@
 Combined FastAPI + Streamlit Application
 Run with: python combined_app.py
 """
-import sys, os
+import sys
 import subprocess
 import multiprocessing
 from pathlib import Path
-# FastAPI imports
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from contextlib import asynccontextmanager
 from time import sleep
 import threading
-import psutil
-import json
 from pathlib import Path
-import socket
     
-# Your custom imports
 from DatabaseManagerPostgre import PostgreDatabaseManager
 from MQTTClient import MQTTPublisher
 from ServoControl import ContinuousServo
@@ -48,7 +43,6 @@ class PipelineConfig(BaseModel):
     video_file: Optional[str] = Field(None, description="Path to video file")
     enable_rtsp: bool = Field(False, description="Enable RTSP streaming")
     enable_websocket: bool = Field(False, description="Enable WebSocket")
-    enable_webrtc: bool = Field(False, description="Enable WebRTC")
     enable_mqtt: bool = Field(True, description="Enable MQTT")
     enable_recording: bool = Field(False, description="Enable video recording")
     output_path: Optional[str] = Field(None, description="Output video path")
@@ -101,39 +95,8 @@ pipeline_running: bool = False
 mqtt_client: Optional[MQTTPublisher] = None
 mqtt_client_sending: bool = False
 
-DB_CONFIG = {'host': '192.168.37.31', 'port': 5432, 'database': 'hailo_db', 'user': 'hailo_user', 'password': 'hailo_pass', 'min_connections': 2, 'max_connections': 10}
+DB_CONFIG = {'host': '0.0.0.0', 'port': 5432, 'database': 'hailo_db', 'user': 'hailo_user', 'password': 'hailo_pass', 'min_connections': 2, 'max_connections': 10}
 MQTT_CONFIG = {'broker_host': 'mqtt.portabo.cz', 'broker_port': 8883, 'topic': '/videoanalyza', 'client_id': 'patrik_dashboard_visualization_listener', 'username': 'videoanalyza', 'password': 'phdA9ZNW1vfkXdJkhhbP'}
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    FastAPI lifespan context manager. Handles startup and shutdown services.
-    """
-    global servo_L, db
-    # Startup
-    print("[FastAPI] Starting up...")
-    # Initialize database
-    try:
-        # Create database manager instance
-        db = PostgreDatabaseManager(DB_CONFIG)
-        print("[FastAPI] Database connected successfully")
-    except Exception as e:
-        print(f"[FastAPI] Database connection failed: {e}")
-        db = None
-    # Initialize servo
-    #try:
-    #    servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
-    #    print("[FastAPI] Servo initialized")
-    #except Exception as e:
-    #    print(f"[FastAPI] Servo initialization failed: {e}")
-    #    servo_L = None
-    yield
-    # Shutdown
-    print("[FastAPI] Shutting down...")
-    if servo_L: 
-        servo_L.cleanup()
-    if db: 
-        db.close()
 
 # Initialize FastAPI
 app = FastAPI()
@@ -141,7 +104,7 @@ app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_credentials=True,all
 
 @app.on_event("startup")
 async def startup():
-    global servo_L, db
+    global servo_L, db, mqtt_client, mqtt_client_sending
     # Startup
     print("[FastAPI] Starting up...")
     # Initialize database
@@ -153,22 +116,25 @@ async def startup():
         print(f"[FastAPI] Database connection failed: {e}")
         db = None
     # Initialize servo
-    #try:
-    #    servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
-    #    print("[FastAPI] Servo initialized")
-    #except Exception as e:
-    #    print(f"[FastAPI] Servo initialization failed: {e}")
-    #    servo_L = None
-
+    try:
+        servo_L = ContinuousServo(chip=0, pin=18) # FIRST SERVO ON PIN 18
+        print("[FastAPI] Servo initialized")
+    except Exception as e:
+        print(f"[FastAPI] Servo initialization failed: {e}")
+        servo_L = None
 @app.on_event("shutdown")
 async def shutdown():
-    global servo_L, db
+    global servo_L, db, mqtt_client, mqtt_client_sending
     print("[FastAPI] Shutting down...")
     if servo_L: 
         servo_L.cleanup()
     if db: 
         db.close()
- 
+        if mqtt_client_sending:
+            mqtt_client.disconnect()
+            mqtt_client = None
+            mqtt_client_sending = False
+
 ## CONFIGURATION FOR CAPTURE STORAGE
 CAPTURE_DIR = Path("captures")
 CAPTURE_DIR.mkdir(exist_ok=True)
@@ -176,11 +142,10 @@ CAPTURE_DIR.mkdir(exist_ok=True)
 ## HELPER FUNCTIONS
 def check_pipeline_instance():
     """Check if pipeline instance exists and is properly initialized"""
-    global pipeline, pipeline_config
-    if pipeline.running is False:
+    global pipeline_running
+    if pipeline_running is False:
         return False, "Pipeline not initialized"
     return True, "Pipeline instance available"
-
 def check_db_instance():
     """Check if database instance exists and is connected"""
     global db
@@ -213,7 +178,7 @@ async def database_status():
     """Check database connection status"""
     global db, mqtt_client, mqtt_client_sending
     is_connected = check_db_instance()
-    if is_connected and db:
+    if is_connected:
         try:
             health = db.get_health_status() 
             if mqtt_client_sending is True:
@@ -229,20 +194,16 @@ async def database_start(data: DatabaseConfig):
     global db, mqtt_client, mqtt_client_sending    
     if db is not None:
         is_connected = check_db_instance()
-        if mqtt_client_sending and is_connected: 
+        if is_connected: 
             return { "status": "already_running", "message": "Database and MQTT client are already connected", "mqtt": mqtt_client_sending }
-        if is_connected:
-            return { "status": "already_running", "message": "Database is already connected", "mqtt": mqtt_client_sending }
     try:
-        db = PostgreDatabaseManager(DB_CONFIG)
+        db = PostgreDatabaseManager(DB_CONFIG) # create new db instance
         if data.mqtt_sending is True:
-            mqtt_client = MQTTPublisher(MQTT_CONFIG)
+            mqtt_client = MQTTPublisher(MQTT_CONFIG) # create new mqtt client instance
             mqtt_client.client.user_data_set({"db": db})
             mqtt_client.client.on_message = mqtt_client.on_message
             mqtt_client.connect({"db": db})
-            time.sleep(2)  # Wait for connection
-            batch_timeout=1.0  # Or every 10 seconds
-        
+            await asyncio.sleep(2)  # Wait for connection
             mqtt_client_sending = True
             print("[FastAPI] MQTT client connected for sending")
         return { "status": "started", "message": "Database connection established successfully", "mqtt": mqtt_client_sending }
@@ -339,7 +300,6 @@ async def get_detections(minutes: int = 5, per: str = "10 minutes"):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching detections: {str(e)}")
 
-# REAL-TIME CURRENT STATE ENDPOINT
 @app.get("/api/statistics", response_model=Dict[str, StatisticsResponse])
 async def get_statistics(hours: int = 1):
     """
@@ -428,7 +388,6 @@ async def pipeline_start(config: PipelineConfig):
             rpicamera=config.rpicamera,
             enable_rtsp=config.enable_rtsp,
             enable_websocket=config.enable_websocket,
-            enable_webrtc=config.enable_webrtc,
             enable_mqtt=config.enable_mqtt,
             enable_recording=config.enable_recording,
             enable_debug=config.enable_debug,
@@ -491,7 +450,6 @@ async def pipeline_modes():
         "features": {
             "enable_rtsp": "Enable RTSP streaming output",
             "enable_websocket": "Enable WebSocket data streaming",
-            "enable_webrtc": "Enable WebRTC streaming",
             "enable_mqtt": "Enable MQTT message publishing",
             "enable_recording": "Record processed video output",
             "enable_debug": "Enable debug logging"
@@ -703,7 +661,9 @@ def root():
 # Streamlit imports
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import time
 import asyncio
@@ -714,12 +674,15 @@ def run_streamlit():
         <style>
         .main { padding: 0rem 1rem; }
         .stMetric { background-color: #f0f2f6; padding: 15px; border-radius: 10px; }
+        [data-testid="metric-container"] { font-size: 12px; }
+        [data-testid="metric-container"] label { font-size: 12px; }
+        [data-testid="metric-container"] [data-testid="stMetricDeltaContainer"] { font-size: 12px; }
         </style>
     """, unsafe_allow_html=True)
     API_BASE_URL = "http://localhost:8000"
-    # Helper functions
+    
     @st.cache_data(ttl=10)
-    def fetch_detections(minutes=60, limit=1000):
+    def fetch_detections(minutes=60, limit=10000000):
         try:
             response = requests.get(
                 f"{API_BASE_URL}/api/detections",
@@ -757,22 +720,32 @@ def run_streamlit():
         except:
             return {}
     
-    st.markdown("---")
-    @st.cache_data(ttl=5)
-    def fetch_db_status():
-        try:
-            response = requests.get(f"{API_BASE_URL}/database/status", timeout=5)
-            #print(f'DB Status Response: {response.status_code} - {response.text}')
-            return response.json() if response.status_code == 200 else None
-        except:
-            return None  
     @st.cache_data(ttl=5)
     def fetch_pipeline_status():
         try:
             response = requests.get(f"{API_BASE_URL}/pipeline/status", timeout=5)
             return response.json() if response.status_code == 200 else None
         except:
-            return None
+            return None 
+    def start_pipeline(config):
+        try:
+            response = requests.post(f"{API_BASE_URL}/pipeline/start", json=config, timeout=10)
+            return response.status_code == 200, response.json()
+        except Exception as e:
+            return False, {"error": str(e)}
+    def stop_pipeline():
+        try:
+            response = requests.post(f"{API_BASE_URL}/pipeline/stop", timeout=10)
+            return response.status_code == 200, response.json()
+        except Exception as e:
+            return False, {"error": str(e)}
+    def fetch_db_status():
+        try:
+            response = requests.get(f"{API_BASE_URL}/database/status", timeout=5)
+            #print(f'DB Status Response: {response.status_code} - {response.text}')
+            return response.json() if response.status_code == 200 else None
+        except:
+            return None     
     def start_database(mqtt_connect):
         try:
             print(f"Starting database with MQTT: {mqtt_connect}")
@@ -786,20 +759,8 @@ def run_streamlit():
             return response.status_code == 200, response.json()
         except Exception as e:
             return False, {"error": str(e)}
-    def start_pipeline(config):
-        try:
-            response = requests.post(f"{API_BASE_URL}/pipeline/start", json=config, timeout=10)
-            return response.status_code == 200, response.json()
-        except Exception as e:
-            return False, {"error": str(e)}
-    def stop_pipeline():
-        try:
-            response = requests.post(f"{API_BASE_URL}/pipeline/stop", timeout=10)
-            return response.status_code == 200, response.json()
-        except Exception as e:
-            return False, {"error": str(e)}
-    
-    st.markdown("---")
+
+    ## SIDEBAR
     with st.sidebar:
         st.header("System Control")
         # Database Status & Control
@@ -847,81 +808,67 @@ def run_streamlit():
             format_func=lambda x: f"Last {x} minutes" if x < 60 else f"Last {x//60} hours",
             index=3
         )
-        limit_options = [1000, 2000, 5000, 10000]
-        limit = st.selectbox(
-            "Select detection limit",
-            options=["All"]+limit_options,
-            index=0,
-            format_func=lambda x: "All detections" if x == "All" else f"{x} detections"
-        )
-        # Convert "All" to a large number for API call
-        limit_value = 1000000 if limit == "All" else limit
+        st.subheader("Statistics interval")
         stats_hours = st.selectbox(
-            "Statistics window",
+            "Statistics win",
             options=[1, 6, 12, 24, 48, 168],
             format_func=lambda x: f"Last {x} hours" if x < 24 else f"Last {x//24} days",
             index=3
-        )
-        INTERVAL_MAP = {"1 minute": {"per": "1 minute", "freq": "1T"}
-                        ,"10 minutes": {"per": "10 minutes", "freq": "10T"},
-                        "1 hour": {"per": "1 hour", "freq": "1H"},
-                        "1 day": {"per": "1 day", "freq": "1D"},}
-        DTICK_MAP = {"10T": 10 * 60 * 1000,"30T": 30 * 60 * 1000,"1H": 60 * 60 * 1000,"6H": 6 * 60 * 60 * 1000,"1D": 24 * 60 * 60 * 1000,"1W": 7 * 24 * 60 * 60 * 1000,"1M": "M1","3M": "M3","1Y": "M12"}
-        FORMAT_MAP = {"1T": "%H:%M","1H": "%H:%M","1D": "%d.%m","1M": "%b %Y","1Y": "%Y"}
-        per = st.selectbox(
-            "Time aggregation",
-            options=["1 minute", "10 minutes", "1 hour", "1 day", "1 month"],
-            index=1
-        )
+        ) 
+
+        INTERVAL_MAP = {"1 minute": "1T", "10 minutes": "10T", "1 hour": "1H", "1 day": "1D", "1 month": "M1" }
+        DTICK_MAP = {"1T": 1 * 60 * 1000,"10T": 10 * 60 * 1000,"30T": 30 * 60 * 1000,"1H": 60 * 60 * 1000,"6H": 6 * 60 * 60 * 1000,"1D": 24 * 60 * 60 * 1000,"1W": 7 * 24 * 60 * 60 * 1000,"1M": "M1","3M": "M3","1Y": "M12"}
+        FORMAT_MAP = {"1T": "%H:%M", "10T": "%H:%M", "30T": "%H:%M", "1H": "%H:%M", "6H": "%H:%M", "1D": "%d.%m", "1W": "%d.%m", "M1": "%b %Y", "M3": "%b %Y", "M12": "%Y"}
+        st.subheader("Time counts visualisation format")
+        per = st.selectbox("Time aggregation", options=["1 minute", "10 minutes", "1 hour", "1 day", "1 month"], index=1)
+        
         st.markdown("---")
         auto_refresh = st.checkbox("Enable auto-refresh", value=True)
-        refresh_interval = st.slider("Refresh interval (seconds)", 5, 60, 10)
+        refresh_interval = st.slider("Refresh interval (seconds)", 5, 60, 30)
         if st.button("Refresh Now"):
             st.cache_data.clear()
             st.rerun()
 
-    # Main content
-    df_detections = fetch_detections(minutes=time_range, limit=limit_value)
+    ## DASHBOARD
+    df_detections = fetch_detections(minutes=time_range, limit=10000000)
     stats = fetch_statistics(hours=stats_hours)
-    if df_detections.empty:
-        st.warning("No detection data available for the selected time range.")
-    else:
-        # Statistics summary table
-        st.title(f"Statistics Summary last {stats_hours} hours")
+    # Statistics summary table
+    if stats:
+        st.subheader(f"Statistics Summary last {stats_hours} hours")    
         col1 = st.columns(1)[0]
         with col1:
             if stats:
-                st
                 stats_data = []
                 for class_name, data in stats.items():
                     stats_data.append({
                         'Class': data['class_name'],
                         'Total Detections': data['total_detections'],
-                        'Unique Tracks': data['unique_tracks'],
                         'Avg Confidence': f"{data['avg_confidence']:.2%}",
                         'Min Confidence': f"{data['min_confidence']:.2%}",
                         'Max Confidence': f"{data['max_confidence']:.2%}"
                     })
                 stats_df = pd.DataFrame(stats_data)
                 st.dataframe(stats_df, width='stretch', hide_index=True)
-            else:
-                st.info("No statistics available for the selected time range.")
-        st.title(f"Detection Analytics Dashboard last {time_range} minutes")
+    else:
+        st.info("No statistics available for the selected time range.")
+        
+    if df_detections.empty:
+        st.warning("No detection data available for the selected time range.")
+    else:
+        st.subheader(f"Detection Analytics Dashboard last {time_range} minutes")
         # Key metrics
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             st.metric("Total Detections", f"{len(df_detections):,}")
         with col2:
-            st.metric("Unique Classes", df_detections['class_name'].nunique())
-        with col3:
             st.metric("Avg Confidence", f"{df_detections['confidence'].mean():.2%}")
         st.markdown("---")
+        
         # Detection timeline line chart
         col1 = st.columns(1)[0]
         with col1:
-            st.subheader("Detection Timeline")
             df_timeline = df_detections.copy()
-            selected = INTERVAL_MAP[per]['freq']
+            selected = INTERVAL_MAP[per]
             df_timeline = df_timeline.set_index("timestamp")
             df_hourly = (
                 df_timeline.resample(selected)          # 1-hour buckets
@@ -929,39 +876,46 @@ def run_streamlit():
                 .reset_index(name="count")
             )
             df_timeline = df_hourly
-            print(df_timeline.head())
-             # Create line chart with Plotly
+            # Remove incomplete periods at start and end
+            if len(df_timeline) > 2:
+                # Simply remove first and last time buckets
+                df_timeline = df_timeline.iloc[1:-1]
+            #print(df_timeline.head())
+            # Create line chart with Plotly
             fig_timeline = px.line(
                 df_timeline,
-                x="timestamp",
+                x=df_timeline.columns[0],
                 y="count",
-                title="Detections every 10 minutes",
+                title=f"Detection timeline every {per}",
                 markers=True
             )
             fig_timeline.update_xaxes(
                 type="date",
                 title="Time",
-                dtick=DTICK_MAP[selected],
-                tickformat="%H:%M", 
+                nticks=10,
+                tickformat=FORMAT_MAP[selected], 
                 ticklabelmode="period",
                 ticks="outside"
             )
-            fig_timeline.update_layout(height=400,hovermode="x unified")
+            fig_timeline.update_layout(height=400,hovermode="x unified", yaxis_title="Number of Objects")
             st.plotly_chart(fig_timeline, use_container_width=True)
 
         # Class distribution pie chart
         col1 = st.columns(1)[0]
         with col1:
-            st.subheader("Class Distribution")
             class_counts = df_detections['class_name'].value_counts()
-            fig_pie = px.pie(values=class_counts.values, names=class_counts.index, hole=0.4)
+            fig_pie = px.pie(
+                values=class_counts.values, 
+                names=class_counts.index, 
+                hole=0.4,     
+                title=f"Class distribution pie",
+            )
             fig_pie.update_layout(height=400)
             st.plotly_chart(fig_pie, width='stretch')
-
+        
         # Confidence distribution
         col1 = st.columns(1)[0]
         with col1:
-            st.subheader("Confidence Distribution")
             fig_conf = px.box(
                 df_detections,
                 x='class_name',
@@ -973,38 +927,58 @@ def run_streamlit():
             fig_conf.update_layout(height=400, showlegend=False)
             st.plotly_chart(fig_conf, width='stretch')
         st.markdown("---")
-        # Row 4: Bounding box visualization
-        st.subheader("Detection Spatial Analysis")
-        col1, col2 = st.columns(2)
+        
+        # Bounding box confidence per class visualization
+        col1 = st.columns(1)[0]
         with col1:
-            # Calculate bbox centers
             df_bbox = df_detections.copy()
             df_bbox['center_x'] = (df_bbox['bbox'].apply(lambda x: x[0]) + df_bbox['bbox'].apply(lambda x: x[2])) / 2
             df_bbox['center_y'] = (df_bbox['bbox'].apply(lambda x: x[1]) + df_bbox['bbox'].apply(lambda x: x[3])) / 2
-            fig_scatter = px.scatter(
-                df_bbox,
-                x='center_x',
-                y='center_y',
-                color='class_name',
-                size='confidence',
-                title='Detection Positions (Bbox Centers)',
-                labels={'center_x': 'X Position', 'center_y': 'Y Position', 'class_name': 'Class'},
-                opacity=0.6
+            # Grid resolution
+            bins_x = 50
+            bins_y = 50
+            # Create histogram
+            heatmap, xedges, yedges = np.histogram2d(
+                df_bbox['center_x'], 
+                df_bbox['center_y'], 
+                bins=[bins_x, bins_y]
             )
-            fig_scatter.update_yaxes(autorange="reversed")
-            fig_scatter.update_layout(height=400)
-            st.plotly_chart(fig_scatter, width='stretch')
-        with col2:
-            st.subheader("Class Distribution (Detections)")
+            # Normalize to 0-1 range
+            if heatmap.max() > 0:
+                heatmap_normalized = heatmap / heatmap.max()
+            else:
+                heatmap_normalized = heatmap
+            # Create heatmap figure
+            fig_heatmap = go.Figure(data=go.Heatmap(
+                z=heatmap_normalized.T,  # Transpose for correct orientation
+                x=xedges[:-1],
+                y=yedges[:-1],
+                colorscale='Hot',  # or 'Viridis', 'Jet', 'Hot', 'Portland'
+                zmin=0,
+                zmax=1,
+                colorbar=dict(title="Density<br>(0-1)")
+            ))
+            fig_heatmap.update_layout(
+                title='Detection Density Heatmap',
+                xaxis_title='X Position',
+                yaxis_title='Y Position',
+                height=400,
+                yaxis=dict(autorange="reversed")  # Reverse Y-axis to match image coordinates
+            )
+            st.plotly_chart(fig_heatmap, use_container_width=True)
+        
+        # Class distributions columns grapf
+        col1 = st.columns(1)[0]
+        with col1:
             class_dist = df_detections['class_name'].value_counts().reset_index()
             class_dist.columns = ['Class', 'Count']
             fig_bar = px.bar(
-            class_dist,
-            x='Class',
-            y='Count',
-            color='Class',
-            title='Detections by Class',
-            labels={'Count': 'Number of Detections', 'Class': 'Object Class'}
+                class_dist,
+                x='Class',
+                y='Count',
+                color='Class',
+                title='Detections distribution by Class',
+                labels={'Count': 'Number of Detections', 'Class': 'Object Class'}
             )
             fig_bar.update_layout(height=400, showlegend=False)
             st.plotly_chart(fig_bar, width='stretch')
