@@ -7,39 +7,56 @@ import json
 from datetime import datetime
 from typing import Optional, List, Tuple
 
-# 1. Nejprve definujeme data class pro výsledky
+# Import funkce pro odesílání na server
+try:
+    from api_integration import post_vehicle_data
+except ImportError:
+    # Pokud by soubor chyběl, vytvoříme náhradní funkci, aby kód nespadl
+    def post_vehicle_data(label, confidence):
+        pass
+
+# 1. Definice datové třídy pro výsledky
 class Detection:
     def __init__(self, bbox: Tuple[int,int,int,int], label: str, confidence: float):
         self.bbox = bbox
         self.label = label
         self.confidence = confidence
 
-# 2. Poté definujeme model (aby ho AIOutputListener už znal)
+# 2. Definice modelu s filtrem na vozidla
 class AIModel:
     def __init__(self, model_path: str = "yolov8n.pt", conf_threshold: float = 0.25):
         self.conf_threshold = conf_threshold
-        # Tady pro demo na PC používáme Ultralytics, v datacentru se přepne na Hailo
         try:
             from ultralytics import YOLO
             self.model = YOLO(model_path)
             self.mode = "CPU/GPU (Ultralytics)"
         except ImportError:
             self.model = None
-            self.mode = "HAILO_PREP" # Příprava pro Hailo kit
+            self.mode = "HAILO_PREP"
         
         print(f"[AIModel] Inicializováno v režimu: {self.mode}")
 
     def process(self, frame: np.ndarray) -> List[Detection]:
         if self.model is None:
-            return [] # Zde v datacentru kolega napojí Hailo inferenci
+            return []
+        
+        # FILTR: Zajímají nás jen tato vozidla
+        allowed_labels = ["car", "truck", "bus", "motorcycle"]
         
         results = self.model(frame, verbose=False, conf=self.conf_threshold)
         detections = []
+        
         for r in results[0].boxes:
+            label = self.model.names[int(r.cls[0])]
+            
+            # Pokud to není vozidlo, ignorujeme ho
+            if label not in allowed_labels:
+                continue
+                
             conf = float(r.conf[0])
             bbox = tuple(map(int, r.xyxy[0]))
-            label = self.model.names[int(r.cls[0])]
             detections.append(Detection(bbox, label, conf))
+            
         return detections
 
     @staticmethod
@@ -51,7 +68,7 @@ class AIModel:
                        cv.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
         return frame
 
-# 3. A až nakonec Listener, který využívá AIModel
+# 3. Listener zajišťující logování a odesílání přes API
 class AIOutputListener:
     def __init__(self, ai_model: AIModel, output_csv: str = "log_detekce.csv", output_json: str = "log_detekce.json"):
         self.ai = ai_model
@@ -67,15 +84,14 @@ class AIOutputListener:
 
         start_time = time.time()
         
-        # Otevření CSV pro zápis
         with open(self.output_csv, mode='w', newline='') as f_csv:
             writer = csv.writer(f_csv)
             writer.writerow(['timestamp', 'label', 'conf', 'bbox'])
 
-            print(f"[DEMO] Spouštím detekci na zdroji: {source}")
+            print(f"[DEMO] Spouštím detekci. Cíl: API + LOG")
             while cap.isOpened():
                 if duration_seconds and (time.time() - start_time) > duration_seconds:
-                    print(f"[INFO] Časový limit {duration_seconds}s vypršel.")
+                    print(f"[INFO] Limit vypršel.")
                     break
 
                 ret, frame = cap.read()
@@ -85,7 +101,10 @@ class AIOutputListener:
                 ts = datetime.now().isoformat()
                 
                 for d in detections:
+                    # 1. Zápis do CSV
                     writer.writerow([ts, d.label, d.confidence, d.bbox])
+                    
+                    # 2. Uložení pro JSON
                     self.results_list.append({
                         "timestamp": ts,
                         "label": d.label,
@@ -93,25 +112,26 @@ class AIOutputListener:
                         "bbox": d.bbox
                     })
 
+                    # 3. NOVINKA: Odeslání live na tvůj server
+                    post_vehicle_data(d.label, d.confidence)
+
                 annotated = self.ai.draw_detections(frame, detections)
-                cv.imshow("Hailo RPi 5 Demo", annotated)
+                cv.imshow("Hailo RPi 5 Demo - Live API", annotated)
                 
                 if cv.waitKey(1) == ord('q'): break
 
-        # Export do JSONu na konci
         with open(self.output_json, 'w', encoding='utf-8') as f_json:
             json.dump(self.results_list, f_json, indent=4)
-            print(f"[SUCCESS] JSON log uložen: {self.output_json}")
+            print(f"[SUCCESS] JSON uložen a data odeslána na server.")
 
         cap.release()
         cv.destroyAllWindows()
 
-# 4. Spuštění
+# 4. Spuštění celého systému
 if __name__ == "__main__":
-    # Opravené cesty podle tvé struktury
-    MODEL_PATH = "yolov8n.pt" # Pro test na PC
-    SOURCE = 0 # Webkamera
+    MODEL_PATH = "yolov8n.pt" 
+    SOURCE = 0 # 0 pro webkameru, nebo cesta k videu
     
     model_instance = AIModel(MODEL_PATH)
     listener = AIOutputListener(model_instance)
-    listener.run_demo(SOURCE, duration_seconds=30)
+    listener.run_demo(SOURCE, duration_seconds=None) # Smaž tu 60ku

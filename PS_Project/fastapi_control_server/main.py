@@ -4,10 +4,14 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Tuple
 from pathlib import Path
 from datetime import datetime
-import lgpio
-import asyncio
-from time import sleep
-import subprocess
+from fastapi import FastAPI
+from pydantic import BaseModel
+from datetime import datetime
+# import lgpio  <-- PŘIDEJ MŘÍŽKU SEM
+
+# Pokud tam máš řádky s nastavováním pinů, dej mřížku i před ně:
+# h = lgpio.gpiochip_open(0) 
+# lgpio.gpio_claim_output(h, 18)
 
 app = FastAPI()
 
@@ -42,8 +46,9 @@ class AIAnalysisResult(BaseModel):
 analysis_history = []
 
 ## SERVO CONTROL
-HANDLE = lgpio.gpiochip_open(0) # Open GPIO chip 0
-lgpio.gpio_claim_output(HANDLE, 18)  # GPIO18 for servo PWM
+# HANDLE = lgpio.gpiochip_open(0) 
+# lgpio.gpio_claim_output(HANDLE, 18)
+# lgpio.gpio_write(HANDLE, 18, 1)
 
 # SERVO MOVE
 @app.post("/servo/move")
