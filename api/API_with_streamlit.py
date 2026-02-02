@@ -674,20 +674,26 @@ def run_streamlit():
         <style>
         .main { padding: 0rem 1rem; }
         .stMetric { background-color: #f0f2f6; padding: 15px; border-radius: 10px; }
-        [data-testid="metric-container"] { font-size: 12px; }
-        [data-testid="metric-container"] label { font-size: 12px; }
-        [data-testid="metric-container"] [data-testid="stMetricDeltaContainer"] { font-size: 12px; }
+        [data-testid="stMetricValue"] {
+            font-size: 24px;  /* Change the value size */
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 28px;  /* Change the label size */
+        }
+        [data-testid="stMetricDelta"] {
+            font-size: 24px;  /* Change the delta size */
+        }
         </style>
     """, unsafe_allow_html=True)
     API_BASE_URL = "http://localhost:8000"
     
-    @st.cache_data(ttl=10)
+    @st.cache_data(ttl=60)
     def fetch_detections(minutes=60, limit=10000000):
         try:
             response = requests.get(
                 f"{API_BASE_URL}/api/detections",
                 params={"minutes": minutes, "limit": limit},
-                timeout=10
+                timeout=300
             )
             if response.status_code == 200:
                 data = response.json()
@@ -700,17 +706,24 @@ def run_streamlit():
                     df[['x1', 'y1', 'x2', 'y2']] = pd.DataFrame(df['bbox'].tolist(), index=df.index)
                     #print(df.head())
                     return df
-            return pd.DataFrame()
-        except:
-            return pd.DataFrame()
+                return pd.DataFrame()
+            else:
+                st.error(f"API Error: {response.status_code} - {response.text}")
+                return []
+        except requests.Timeout:
+            st.error(f"Request timed out fetching {minutes} minutes of data")
+            return []
+        except Exception as e:
+            st.error(f"Error fetching detections: {str(e)}")
+            return []
     
-    @st.cache_data(ttl=30)
+    @st.cache_data(ttl=60)
     def fetch_statistics(hours=24):
         try:
             response = requests.get(
                 f"{API_BASE_URL}/api/statistics",
                 params={"hours": hours},
-                timeout=5
+                timeout=300
             )
             data = response.json()
             if data:
@@ -773,17 +786,17 @@ def run_streamlit():
                 st.metric("Total Detections", f"{db_status['total_detections']:,}")
             if db_status.get('database_size') is not None:
                 st.metric("Database Size", db_status['database_size'])
-            if db_status.get('mqtt_sending') is True:
-                st.metric("MQTT sending", "Enabled")
-            if st.button("Stop Database", use_container_width=True):
-                success, result = stop_database()
-                if success:
-                    st.success("Database stopped")
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error(f"Failed: {result}")
+            #if db_status.get('mqtt_sending') is True:
+            #    st.metric("MQTT sending", "Enabled")
+            #if st.button("Stop Database", use_container_width=True):
+            #    success, result = stop_database()
+            #    if success:
+            #        st.success("Database stopped")
+            #        st.cache_data.clear()
+            #        time.sleep(1)
+            #        st.rerun()
+            #    else:
+            #        st.error(f"Failed: {result}")
         else:
             st.error(f"Not Connected {db_status.get('health', '')}")
             #col1 = st.columns(1)[0]
@@ -800,7 +813,6 @@ def run_streamlit():
                     else:
                         st.error(f"Failed: {result}")
         
-        st.markdown("---")
         st.subheader("Time Range")
         time_range = st.selectbox(
             "Select time range",
@@ -824,7 +836,7 @@ def run_streamlit():
         
         st.markdown("---")
         auto_refresh = st.checkbox("Enable auto-refresh", value=True)
-        refresh_interval = st.slider("Refresh interval (seconds)", 5, 60, 30)
+        refresh_interval = st.slider("Refresh interval (seconds)", 5, 60, 60)
         if st.button("Refresh Now"):
             st.cache_data.clear()
             st.rerun()
@@ -897,7 +909,11 @@ def run_streamlit():
                 ticklabelmode="period",
                 ticks="outside"
             )
-            fig_timeline.update_layout(height=400,hovermode="x unified", yaxis_title="Number of Objects")
+            fig_timeline.update_layout(
+                height=400,
+                hovermode="x unified", 
+                yaxis_title="Number of Objects"
+            )
             st.plotly_chart(fig_timeline, use_container_width=True)
 
         # Class distribution pie chart
@@ -910,7 +926,9 @@ def run_streamlit():
                 hole=0.4,     
                 title=f"Class distribution pie",
             )
-            fig_pie.update_layout(height=400)
+            fig_pie.update_layout(
+                height=500
+            )
             st.plotly_chart(fig_pie, width='stretch')
         
         # Confidence distribution
@@ -924,10 +942,32 @@ def run_streamlit():
                 title='Confidence by Class',
                 labels={'class_name': 'Class', 'confidence': 'Confidence'}
             )
-            fig_conf.update_layout(height=400, showlegend=False)
+            fig_conf.update_layout(
+                height=600, 
+                showlegend=False
+            )
             st.plotly_chart(fig_conf, width='stretch')
         st.markdown("---")
-        
+        col1 = st.columns(1)[0]
+        with col1:
+            # Calculate bbox centers
+            df_bbox = df_detections.copy()
+            df_bbox['center_x'] = (df_bbox['bbox'].apply(lambda x: x[0]) + df_bbox['bbox'].apply(lambda x: x[2])) / 2
+            df_bbox['center_y'] = (df_bbox['bbox'].apply(lambda x: x[1]) + df_bbox['bbox'].apply(lambda x: x[3])) / 2
+            fig_scatter = px.scatter(
+                df_bbox,
+                x='center_x',
+                y='center_y',
+                color='class_name',
+                size='confidence',
+                title='Detection Positions (Bbox Centers)',
+                labels={'center_x': 'X Position', 'center_y': 'Y Position', 'class_name': 'Class'},
+                opacity=0.6
+            )
+            fig_scatter.update_yaxes(autorange="reversed")
+            fig_scatter.update_layout(title='Spatial analysis map',height=400)
+            st.plotly_chart(fig_scatter, use_container_width=True)
+    
         # Bounding box confidence per class visualization
         col1 = st.columns(1)[0]
         with col1:
@@ -935,34 +975,27 @@ def run_streamlit():
             df_bbox['center_x'] = (df_bbox['bbox'].apply(lambda x: x[0]) + df_bbox['bbox'].apply(lambda x: x[2])) / 2
             df_bbox['center_y'] = (df_bbox['bbox'].apply(lambda x: x[1]) + df_bbox['bbox'].apply(lambda x: x[3])) / 2
             # Grid resolution
-            bins_x = 50
-            bins_y = 50
+            bins_x = 40
+            bins_y = 40
             # Create histogram
             heatmap, xedges, yedges = np.histogram2d(
                 df_bbox['center_x'], 
                 df_bbox['center_y'], 
                 bins=[bins_x, bins_y]
             )
-            # Normalize to 0-1 range
-            if heatmap.max() > 0:
-                heatmap_normalized = heatmap / heatmap.max()
-            else:
-                heatmap_normalized = heatmap
             # Create heatmap figure
             fig_heatmap = go.Figure(data=go.Heatmap(
-                z=heatmap_normalized.T,  # Transpose for correct orientation
+                z=heatmap.T,  # Transpose for correct orientation
                 x=xedges[:-1],
                 y=yedges[:-1],
                 colorscale='Hot',  # or 'Viridis', 'Jet', 'Hot', 'Portland'
-                zmin=0,
-                zmax=1,
                 colorbar=dict(title="Density<br>(0-1)")
             ))
             fig_heatmap.update_layout(
                 title='Detection Density Heatmap',
                 xaxis_title='X Position',
                 yaxis_title='Y Position',
-                height=400,
+                height=600,
                 yaxis=dict(autorange="reversed")  # Reverse Y-axis to match image coordinates
             )
             st.plotly_chart(fig_heatmap, use_container_width=True)
@@ -978,9 +1011,17 @@ def run_streamlit():
                 y='Count',
                 color='Class',
                 title='Detections distribution by Class',
-                labels={'Count': 'Number of Detections', 'Class': 'Object Class'}
+                labels={'Count': 'Number of Detections', 'Class': 'Object Class'},
+                text='Count'
             )
-            fig_bar.update_layout(height=400, showlegend=False)
+            fig_bar.update_traces(
+               texttemplate='%{text}',  
+               textposition='outside'  
+            )       
+            fig_bar.update_layout(
+                height=600, 
+                showlegend=False
+            )
             st.plotly_chart(fig_bar, width='stretch')
 
     if auto_refresh:
