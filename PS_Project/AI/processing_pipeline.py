@@ -134,4 +134,4 @@ if __name__ == "__main__":
     
     model_instance = AIModel(MODEL_PATH)
     listener = AIOutputListener(model_instance)
-    listener.run_demo(SOURCE, duration_seconds=None) # Smaž tu 60ku
+    listener.run_demo(SOURCE, duration_seconds=None) 
