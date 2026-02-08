@@ -20,5 +20,7 @@ AI_traffic_detection(hailo)/yolov8m.har
 AI_traffic_detection(hailo)/yolov8m.onnx
 AI_traffic_detection(hailo)/yolov8m_compiled.har
 AI_traffic_detection(hailo)/yolov8m_optimized.har
-
+__pycache__/
+*.mp4
+.venv/
 
