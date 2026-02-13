@@ -25,7 +25,9 @@ import sys
 from datetime import datetime
 from collections import defaultdict
 from MQTTClient import MQTTPublisher
+from collections import deque
 from WebSocket import WebSocketServerWithDetectionData
+import cv2
 import numpy as np
 try:
     from hailo import get_roi_from_buffer, HAILO_DETECTION, HAILO_UNIQUE_ID
@@ -282,6 +284,197 @@ class RTSPServer:
         if self.server:
             self.server.attach(None)
 
+class DetectionZone:
+    """
+    Defines one or more detection zones in normalised coordinates (0.0 – 1.0).
+    Supported shapes:
+        rectangle – {'type':'rectangle', 'x','y','w','h'}
+        circle – {'type':'circle', 'center_x','center_y','radius'}
+        semicircle – {'type':'semicircle','center_x','center_y','radius', 'direction': 'bottom'|'top'|'left'|'right'}
+        polygon – {'type':'polygon', 'points':[(x,y),...]}
+        ellipse – {'type':'ellipse', 'center_x','center_y','radius_x','radius_y'}
+    Every zone dict may also contain:
+        'name'    : str   – human-readable label (default: shape type)
+        'enabled' : bool  – set False to temporarily disable (default: True)
+    """
+    DEFAULT_ZONES = [
+        {'name': 'entrance','type': 'semicircle','center_x': 0.5,'center_y': 0.85,'radius': 0.35,'direction': 'bottom','enabled': True,},
+    ]
+    def __init__(self, zones=None):
+        """
+        Parameters
+        zones : list of zone dicts, optional, Pass a custom list to override DEFAULT_ZONES.
+        """
+        raw = zones if zones is not None else self.DEFAULT_ZONES
+        self._zones = self._precompute(raw)
+
+    @staticmethod
+    def _precompute(zones):
+        """
+        Cache radius² for circle / semicircle zones so the hot-path
+        check can use  dx²+dy² <= r²  instead of sqrt().
+        """
+        result = []
+        for zone in zones:
+            z = dict(zone)                          # shallow copy – don't mutate original
+            if z.get('type') in ('circle', 'semicircle'):
+                z['_r2'] = z['radius'] ** 2         # pre-computed r²
+            result.append(z)
+        return result
+
+    def check(self, cx, cy):
+        """
+        Check whether the point (cx, cy) falls inside ANY enabled zone.
+        Parameters:
+            cx, cy : float – normalised centre of the detection bbox (0.0 – 1.0)
+        Returns:
+            (bool, str | None)
+                (in_zone, zone_name)
+        """
+        for zone in self._zones:
+            if not zone.get('enabled', True):
+                continue
+            if self._dispatch(cx, cy, zone):
+                return True, zone.get('name', zone['type'])
+        return False, None
+
+    def update_zone(self, name, **kwargs):
+        """
+        Update properties of an existing zone by name at runtime.
+        Example:
+            pipeline.zone.update_zone('entrance', center_x=0.3, radius=0.25)
+        """
+        for zone in self._zones:
+            if zone.get('name') == name:
+                zone.update(kwargs)
+                if zone.get('type') in ('circle', 'semicircle'):
+                    zone['_r2'] = zone['radius'] ** 2
+                return
+        print(f"[DetectionZone] Zone '{name}' not found")
+
+    def enable_zone(self, name, enabled=True):
+        """Enable or disable a zone by name."""
+        for zone in self._zones:
+            if zone.get('name') == name:
+                zone['enabled'] = enabled
+                return
+        print(f"[DetectionZone] Zone '{name}' not found")
+
+    @property
+    def active_count(self):
+        """Number of currently enabled zones."""
+        return sum(1 for z in self._zones if z.get('enabled', True))
+    
+    def _dispatch(self, cx, cy, zone):
+        zt = zone['type']
+        if zt == 'rectangle':
+            return self._rect(cx, cy, zone)
+        if zt == 'semicircle':
+            return self._semi(cx, cy, zone)
+        if zt == 'circle':
+            return self._circ(cx, cy, zone)
+        if zt == 'polygon':
+            return self._poly(cx, cy, zone)
+        if zt == 'ellipse':
+            return self._ell(cx, cy, zone)
+        print(f"[DetectionZone] Unknown type: '{zt}'")
+        return False
+
+    @staticmethod
+    def _rect(cx, cy, z):
+        return (z['x'] <= cx <= z['x'] + z['w'] and z['y'] <= cy <= z['y'] + z['h'])
+    @staticmethod
+    def _circ(cx, cy, z):
+        dx = cx - z['center_x']
+        dy = cy - z['center_y']
+        return dx * dx + dy * dy <= z['_r2']          # no sqrt needed
+    @staticmethod
+    def _semi(cx, cy, z):
+        dx = cx - z['center_x']
+        dy = cy - z['center_y']
+        if dx * dx + dy * dy > z['_r2']:              # no sqrt needed
+            return False
+        d = z.get('direction', 'bottom')
+        if d == 'bottom': return cy >= z['center_y']
+        if d == 'top':    return cy <= z['center_y']
+        if d == 'right':  return cx >= z['center_x']
+        if d == 'left':   return cx <= z['center_x']
+        return False
+    @staticmethod
+    def _poly(cx, cy, z):
+        """Ray-casting algorithm for arbitrary polygon."""
+        pts = z['points']
+        n   = len(pts)
+        inside = False
+        p1x, p1y = pts[0]
+        for i in range(1, n + 1):
+            p2x, p2y = pts[i % n]
+            if cy > min(p1y, p2y):
+                if cy <= max(p1y, p2y):
+                    if cx <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xi = (cy - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or cx <= xi:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        return inside
+    @staticmethod
+    def _ell(cx, cy, z):
+        dx = (cx - z['center_x']) / z['radius_x']
+        dy = (cy - z['center_y']) / z['radius_y']
+        return dx * dx + dy * dy <= 1.0
+
+    def draw(self, frame, color=(0, 220, 0), thickness=2):
+        """
+        Draw all enabled zones onto a BGR numpy frame (OpenCV).
+        Only import cv2 when this method is actually called.
+        """
+        h, w = frame.shape[:2]
+        for zone in self._zones:
+            if not zone.get('enabled', True):
+                continue
+            zt   = zone['type']
+            name = zone.get('name', zt)
+            if zt == 'rectangle':
+                x1 = int(zone['x'] * w); y1 = int(zone['y'] * h)
+                x2 = int((zone['x'] + zone['w']) * w)
+                y2 = int((zone['y'] + zone['h']) * h)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+                cv2.putText(frame, name, (x1 + 4, y1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+            elif zt in ('circle', 'semicircle'):
+                cx_px = int(zone['center_x'] * w)
+                cy_px = int(zone['center_y'] * h)
+                r_px  = int(zone['radius'] * w)
+                cv2.circle(frame, (cx_px, cy_px), r_px, color, thickness)
+                if zt == 'semicircle':
+                    d = zone.get('direction', 'bottom')
+                    if d in ('bottom', 'top'):
+                        cv2.line(frame, (cx_px - r_px, cy_px),
+                                 (cx_px + r_px, cy_px), color, thickness)
+                        overlay = frame.copy()
+                        if d == 'bottom':
+                            cv2.rectangle(overlay, (cx_px - r_px, cy_px - r_px), (cx_px + r_px, cy_px), (0, 0, 0), -1)
+                        else:
+                            cv2.rectangle(overlay, (cx_px - r_px, cy_px), (cx_px + r_px, cy_px + r_px), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    else:
+                        cv2.line(frame, (cx_px, cy_px - r_px), (cx_px, cy_px + r_px), color, thickness)
+                cv2.putText(frame, name, (cx_px - r_px, cy_px - r_px - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+            elif zt == 'polygon':
+                pts = np.array([(int(px * w), int(py * h)) for px, py in zone['points']], dtype=np.int32)
+                cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=thickness)
+                cx_px = int(np.mean(pts[:, 0]))
+                cy_px = int(np.mean(pts[:, 1]))
+                cv2.putText(frame, name, (cx_px, cy_px), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+            elif zt == 'ellipse':
+                cx_px = int(zone['center_x'] * w)
+                cy_px = int(zone['center_y'] * h)
+                rx_px = int(zone['radius_x'] * w)
+                ry_px = int(zone['radius_y'] * h)
+                cv2.ellipse(frame, (cx_px, cy_px), (rx_px, ry_px), 0, 0, 360, color, thickness)
+                cv2.putText(frame, name, (cx_px - rx_px, cy_px - ry_px - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+        return frame
+
 class HailoTrackerPipeline:
     """
     Main class for managing the GStreamer pipeline with Hailo detection and tracking.
@@ -319,11 +512,17 @@ class HailoTrackerPipeline:
         # frame count
         self.frame_count = 0
         # Set of sent track IDs to avoid duplicates
+        self._sent_deque = deque(maxlen=500)
         self.sent_track_ids = set()
         # Recording
         self.recording_sink = None
         # Dynamic overlay text for count display
         self.count_overlay = ""  
+        # valid labels
+        self.VALID_LABELS = frozenset(["car", "motorcycle", "bicycle", "truck", "bus", "person"])
+        # Detection zone
+        #self.zone_config = {'type': 'semicircle', 'center_x': 0.5, 'center_y': 0.85, 'radius': 0.35, 'direction': 'bottom'}
+        self.zone = DetectionZone(None) 
         # Running flag
         self.running = False
         
@@ -378,6 +577,7 @@ class HailoTrackerPipeline:
             "! hailofilter qos=false name=hailofilter function-name=yolov8m "
             "so-path=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so "
             "! queue leaky=no max-size-buffers=5 max-size-bytes=0 max-size-time=0 " # After hailofilter, keep tight 
+            "! identity name=zone_filter "
             "! hailotracker keep-past-metadata=true kalman-dist-thr=0.85 iou-thr=0.5 keep-new-frames=5 keep-tracked-frames=45 keep-lost-frames=20 name=hailotracker "
             "! hailooverlay show-confidence=true line-thickness=2 name=hailooverlay "
             "! textoverlay text='Hailo Tracker - YOLOv8m' valignment=top halignment=left font-desc='Sans 12' "
@@ -495,7 +695,7 @@ class HailoTrackerPipeline:
             track = detection.get_objects_typed(HAILO_UNIQUE_ID)
             if len(track) == 1: tracking_id = track[0].get_id()
             # Filter by class (only vehicles and persons)
-            if label not in ["car", "motorcycle", "bicycle", "truck", "bus", "person"]:  # Threshold for valid detections
+            if label not in self.VALID_LABELS:
                 #print(f"[DEBUG] Skipping detection with label(not vehicle): {label}")
                 continue
             # Avoid sending duplicate track IDs
@@ -566,9 +766,6 @@ class HailoTrackerPipeline:
             print(f"[ERROR] RTSP sample callback error: {e}")
             return Gst.FlowReturn.ERROR
     
-    
-
-
     def start(self):
         """
         Starts the pipeline with all configured features
