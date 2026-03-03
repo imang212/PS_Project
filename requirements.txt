@@ -1,6 +1,0 @@
-ultralytics
-opencv-python
-requests
-fastapi
-uvicorn
-watchfiles

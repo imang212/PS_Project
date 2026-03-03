@@ -1,16 +1,23 @@
-# Deep Learning a Computer Vision
+# Deep Learning & Computer Vision
 onnx>=1.19.1
 onnxruntime>=1.15.1
-ultralytics>=8.3.230 #8.0.0
-# Web Framework a API
+ultralytics>=8.3.230
+torch
+torchvision
+torchaudio
+# Web Framework & API
 fastapi>=0.121.3
 uvicorn[standard]>=0.38.0
 websockets>=15.0.1
 # Computer Vision
 av
 opencv-python>=4.12.0.88
-# Numerické výpočty a filtrace
+# Numerical
+numpy
 filterpy>=1.4.5
-# Validace dat
+# Validation
 pydantic>=2.12.4
-
+# Database
+psycopg2-binary
+# MQTT
+paho-mqtt
