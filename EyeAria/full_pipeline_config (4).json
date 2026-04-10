@@ -1,0 +1,77 @@
+{
+  "viewport": {
+    "pan_x": 163,
+    "pan_y": -6,
+    "zoom": 1.0
+  },
+  "root": {
+    "type": "Input Gateway",
+    "id": "429b20be-7da6-4c4f-bbb3-1398dfe8550d",
+    "x": 463.0,
+    "y": 385.0,
+    "width": 288,
+    "height": 126,
+    "collapsed": false,
+    "subscribers": [
+      {
+        "type": "Visualizer",
+        "id": "1ac72129-c374-4c6f-a456-e952cfb09346",
+        "x": 975.0,
+        "y": 438.0,
+        "width": 288,
+        "height": 394,
+        "collapsed": false,
+        "subscribers": [],
+        "target_module": null
+      },
+      {
+        "type": "Logger",
+        "id": "264d1b3d-6b55-44ea-94b1-b3a7173bcbec",
+        "x": 911.0,
+        "y": 134.0,
+        "width": 288,
+        "height": 156,
+        "collapsed": false,
+        "subscribers": [],
+        "log_format": "Full JSON"
+      }
+    ],
+    "input_nodes": [
+      {
+        "type": "Hailo",
+        "id": "715a017c-3b4b-4fed-ac87-d1378144c25f",
+        "x": 79.0,
+        "y": 4.0,
+        "width": 288,
+        "height": 599,
+        "collapsed": false,
+        "subscribers": [],
+        "source_type": "Stream/File",
+        "source_path": "rtsp://admin:Dcuk.123456@192.168.37.99/Stream",
+        "camera_index": 0,
+        "camera_resolution_str": "1920,1080,30",
+        "rotation": 0,
+        "flip_h": false,
+        "flip_v": false,
+        "hef_path": "/home/nightshadearia/EyeAria/yolov8s_h8l.hef",
+        "so_path": "/home/nightshadearia/EyeAria/libyolo_hailortpp_post.so",
+        "tracking_enabled": true,
+        "keep_tracked_frames": 30,
+        "keep_lost_frames": 10
+      },
+      {
+        "type": "MPU-9250 IMU",
+        "id": "84cc9143-44b5-478c-87da-11cda82b8bc0",
+        "x": 81.0,
+        "y": 625.0,
+        "width": 288,
+        "height": 317,
+        "collapsed": false,
+        "subscribers": [],
+        "i2c_bus": 1,
+        "i2c_address": "0x68",
+        "polling_rate_hz": 50
+      }
+    ]
+  }
+}

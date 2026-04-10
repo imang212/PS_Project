@@ -1,0 +1,91 @@
+{
+  "viewport": {
+    "pan_x": 52,
+    "pan_y": 21,
+    "zoom": 0.8499999999999999
+  },
+  "root": {
+    "type": "Hailo",
+    "id": "1c56bcae-7db5-4a59-9f26-9b6457879fd9",
+    "x": 80,
+    "y": 80,
+    "width": 288,
+    "height": 456,
+    "collapsed": false,
+    "subscribers": [
+      {
+        "type": "Filter",
+        "id": "c91cf01b-895a-4a41-8f88-9d2c921a90f9",
+        "x": 457.9999999999999,
+        "y": 505.2631578947368,
+        "width": 288,
+        "height": 254,
+        "collapsed": false,
+        "subscribers": [
+          {
+            "type": "Logger",
+            "id": "6abd3ec3-e5f5-4310-aaa2-30f6385bf3d6",
+            "x": 1363.1207430340557,
+            "y": 201.11455108359132,
+            "width": 288,
+            "height": 717,
+            "collapsed": false,
+            "subscribers": [],
+            "max_path_points": 50,
+            "max_rects_per_obj": 5,
+            "show_labels": true,
+            "show_background": true,
+            "bg_source_path": ""
+          },
+          {
+            "type": "Postgres Sink",
+            "id": "84760e05-5012-4dc7-b3bd-afa87658fec3",
+            "x": 947.7647058823527,
+            "y": 37.027863777089635,
+            "width": 288,
+            "height": 423,
+            "collapsed": false,
+            "subscribers": [],
+            "host": "127.0.0.1",
+            "port": 5432,
+            "dbname": "eyearia",
+            "user": "postgres",
+            "password": "postgres",
+            "data_dir": "./postgres_data"
+          }
+        ],
+        "logic_mode": "AND",
+        "conditions": [
+          {
+            "type": "Confidence",
+            "config": {
+              "min_conf": 0.5,
+              "max_conf": 1
+            }
+          }
+        ]
+      },
+      {
+        "type": "MQTT Sink",
+        "id": "b1db8175-24ca-4cc4-8b43-60837f81a2c2",
+        "x": 516.9473684210525,
+        "y": 30.5263157894737,
+        "width": 288,
+        "height": 430,
+        "collapsed": false,
+        "subscribers": [],
+        "broker": "mqtt.portabo.cz",
+        "port": 8883,
+        "topic": "/videoanalyza",
+        "username": "videoanalyza",
+        "password": "phdA9ZNW1vfkXdJkhhbP"
+      }
+    ],
+    "source_path": "rtsp://admin:Dcuk.123456@192.168.37.99/Stream",
+    "hef_path": "/home/nightshadearia/EyeAria/yolov8s_h8l.hef",
+    "so_path": "/home/nightshadearia/EyeAria/libyolo_hailortpp_post.so",
+    "tracking_enabled": true,
+    "keep_tracked_frames": 30,
+    "keep_lost_frames": 10
+  }
+}
