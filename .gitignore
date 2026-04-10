@@ -1,5 +1,0 @@
-.venv/
-__pycache__/
-rpi_src/hailo_packages/
-pc_src/yolov8n_src/yolo_files/yolov3.weights
-
