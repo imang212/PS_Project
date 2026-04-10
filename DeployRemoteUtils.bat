@@ -1,1 +1,0 @@
-python RemoteUtils.py --cli 192.168.37.205 imang imang --destroy --deploy --reboot
